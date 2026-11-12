@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CercaCorno</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 16px; }
+    button { font-size: 1.2rem; padding: 12px 20px; }
+    #meter { height: 30px; background: #eee; margin-top: 20px; border-radius: 6px; overflow: hidden; }
+    #bar { height: 100%; width: 0%; background: #2a7; transition: width 0.05s; }
+    #status { margin-top: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>CercaCorno</h1>
+  <p>Step 1: microphone test. Press the button and play or sing.</p>
+  <button id="start">Start microphone</button>
+  <div id="meter"><div id="bar"></div></div>
+  <p id="status">Microphone is off.</p>
+
+  <script>
+    const startButton = document.getElementById("start");
+    const bar = document.getElementById("bar");
+    const statusText = document.getElementById("status");
+
+    startButton.addEventListener("click", async () => {
+      try {
+        // Ask the browser for the microphone (needs HTTPS)
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        // Web Audio: microphone -> analyser
+        const audioContext = new AudioContext();
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+
+        const samples = new Float32Array(analyser.fftSize);
+        statusText.textContent = "Microphone is on. Sample rate: " + audioContext.sampleRate + " Hz";
+        startButton.disabled = true;
+
+        // Every screen frame: read the signal and compute its loudness (RMS)
+        function update() {
+          analyser.getFloatTimeDomainData(samples);
+          let sum = 0;
+          for (let i = 0; i < samples.length; i++) {
+            sum += samples[i] * samples[i];
+          }
+          const rms = Math.sqrt(sum / samples.length);
+          bar.style.width = Math.min(100, rms * 300) + "%";
+          requestAnimationFrame(update);
+        }
+        update();
+      } catch (error) {
+        statusText.textContent = "Error: " + error.name + " — " + error.message;
+      }
+    });
+  </script>
+</body>
+</html>
