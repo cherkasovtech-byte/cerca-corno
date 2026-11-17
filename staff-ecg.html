@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chi cerca il corno: ECG staff, 3 variants</title>
+<style>
+  :root { --black: #000000; --white: #ffffff; --grey: #888888; --dark: #222222; --font: ui-monospace, monospace; }
+  body { background: var(--black); color: var(--white); font-family: var(--font); margin: 0; padding: 24px 0; text-align: center; }
+  h1 { font-size: 20px; font-weight: normal; margin: 0 0 6px; }
+  h2 { font-size: 15px; font-weight: normal; color: var(--grey); margin: 28px 0 4px; }
+  canvas { display: block; width: 100%; height: 350px; }
+  button { background: transparent; color: var(--white); border: 1px solid var(--white); font: inherit; font-size: 14px; padding: 6px 12px; margin: 10px 6px 0; cursor: pointer; }
+  button:hover { background: var(--white); color: var(--black); }
+  #status { color: var(--grey); font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>Chi cerca il corno</h1>
+<button id="test">Test melody</button>
+<button id="start">Start microphone</button>
+<p id="status">Press Test melody or Start microphone.</p>
+
+<h2>1 · Magnifier: fixed scale, moving mark</h2>
+<canvas id="canvas1"></canvas>
+<h2>2 · Moving scale, fixed pointer</h2>
+<canvas id="canvas2"></canvas>
+<h2>3 · Needle that writes the graph</h2>
+<canvas id="canvas3"></canvas>
+
+<script>
+const noteLetters = ["Do", "Do", "Re", "Mi", "Mi", "Fa", "Fa", "Sol", "La", "La", "Si", "Si"];
+const noteAccidentals = ["", "♯", "", "♭", "", "", "♯", "", "♭", "", "♭", ""];
+const letterSteps = [0, 0, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6];
+const referenceA = 442;
+const transposition = 7;
+const framesPerReading = 3;
+const inTuneCents = 10;
+
+function writtenMidiToNote(writtenMidi) {
+  const midi = Math.round(writtenMidi);
+  const octave = Math.floor(midi / 12) - 1;
+  return {
+    letter: noteLetters[midi % 12],
+    accidental: noteAccidentals[midi % 12],
+    octave: octave,
+    cents: Math.round(100 * (writtenMidi - midi)),
+    staffStep: octave * 7 + letterSteps[midi % 12]
+  };
+}
+// написанная высота (дробный номер MIDI) -> нота, центы и ступень на нотоносце
+
+function frequencyToWrittenMidi(frequency) {
+  return 69 + 12 * Math.log2(frequency / referenceA) + transposition;
+}
+
+function detectFrequency(samples, sampleRate) {
+  const minLag = Math.floor(sampleRate / 1000);
+  const maxLag = Math.floor(sampleRate / 60);
+  let bestLag = 0;
+  let bestScore = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let score = 0;
+    for (let i = 0; i < samples.length - lag; i++) {
+      score += samples[i] * samples[i + lag];
+    }
+    if (score > bestScore) { bestScore = score; bestLag = lag; }
+  }
+  return sampleRate / bestLag;
+}
+
+function median(values) {
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function centsColor(cents) {
+  if (Math.abs(cents) <= inTuneCents) {
+    return "hsl(140, 60%, 65%)";
+  }
+  const distance = Math.min(1, (Math.abs(cents) - inTuneCents) / (50 - inTuneCents));
+  if (cents < 0) {
+    return "hsl(" + (195 + 35 * distance) + ", 90%, " + (75 - 15 * distance) + "%)";
+  }
+  return "hsl(" + (335 + 25 * distance) + ", 90%, " + (78 - 20 * distance) + "%)";
+}
+// та же раскраска центов, что в пене
+
+function lineColor(accidental) {
+  if (accidental === "♭") return "hsl(205, 90%, 68%)";
+  if (accidental === "♯") return "hsl(340, 90%, 72%)";
+  return "#ffffff";
+}
+
+const canvasHeight = 350;
+const gap = 34;
+const half = gap / 2;
+const bottomY = 216;
+const middleY = bottomY - 2 * gap;
+const bottomLineStep = 4 * 7 + 2;
+const stepX = 3;
+const pauseWidth = 2.5 * gap;
+const zoomHalf = 110;
+const stepToY = (staffStep) => bottomY - (staffStep - bottomLineStep) * half;
+// размеры: расстояние между линейками, сколько пикселей на одно показание, ширина отступа на паузе, полувысота лупы
+
+let history = [];
+// лента: элементы { type: "note", note } или { type: "pause" }
+
+function addReading(note) {
+  const last = history[history.length - 1];
+  if (note === null) {
+    if (last && last.type !== "pause") history.push({ type: "pause" });
+  } else {
+    history.push({ type: "note", note: note });
+  }
+  if (history.length > 2000) history.shift();
+  drawAll();
+}
+// звук: новое показание; тишина: один отступ, дальше лента стоит
+
+function placeItems(headX) {
+  const placed = [];
+  let x = headX;
+  for (let i = history.length - 1; i >= 0 && x > -pauseWidth; i--) {
+    const item = history[i];
+    if (item.type === "pause") {
+      placed.unshift({ pause: true });
+      x -= pauseWidth;
+    } else {
+      placed.unshift({ note: item.note, left: x - stepX, right: x });
+      x -= stepX;
+    }
+  }
+  return placed;
+}
+// раскладываем ленту справа налево: самое новое показание у пишущей головки
+
+function findRuns(placed) {
+  const runs = [];
+  let current = null;
+  for (let i = 0; i < placed.length; i++) {
+    const p = placed[i];
+    if (p.pause) { current = null; continue; }
+    const same = current && p.note.staffStep === current.staffStep && p.note.accidental === current.accidental;
+    if (same) {
+      current.right = p.right;
+      current.points.push({ x: (p.left + p.right) / 2, cents: p.note.cents });
+    } else {
+      current = {
+        left: p.left, right: p.right,
+        staffStep: p.note.staffStep, accidental: p.note.accidental,
+        afterPause: i === 0 || placed[i - 1].pause === true,
+        points: [{ x: (p.left + p.right) / 2, cents: p.note.cents }]
+      };
+      runs.push(current);
+    }
+  }
+  return runs;
+}
+// отрезки одной ноты; между разными нотами линию больше не соединяем
+
+function drawAccidental(ctx, accidental, rightX, centerY, size, color) {
+  const width = size * 0.42;
+  ctx.strokeStyle = color;
+  ctx.lineCap = "butt";
+  if (accidental === "♯") {
+    const tilt = size * 0.07;
+    ctx.lineWidth = size * 0.06;
+    ctx.beginPath();
+    ctx.moveTo(rightX - width * 0.72, centerY - size * 0.46); ctx.lineTo(rightX - width * 0.72, centerY + size * 0.5);
+    ctx.moveTo(rightX - width * 0.28, centerY - size * 0.5); ctx.lineTo(rightX - width * 0.28, centerY + size * 0.46);
+    ctx.stroke();
+    ctx.lineWidth = size * 0.13;
+    ctx.beginPath();
+    ctx.moveTo(rightX - width, centerY - size * 0.15 + tilt); ctx.lineTo(rightX, centerY - size * 0.15 - tilt);
+    ctx.moveTo(rightX - width, centerY + size * 0.15 + tilt); ctx.lineTo(rightX, centerY + size * 0.15 - tilt);
+    ctx.stroke();
+  } else {
+    const stemX = rightX - width * 0.85;
+    ctx.lineWidth = size * 0.07;
+    ctx.beginPath();
+    ctx.moveTo(stemX, centerY - size * 0.75); ctx.lineTo(stemX, centerY + size * 0.3);
+    ctx.stroke();
+    ctx.lineWidth = size * 0.09;
+    ctx.beginPath();
+    ctx.moveTo(stemX, centerY - size * 0.08);
+    ctx.bezierCurveTo(stemX + width * 0.75, centerY - size * 0.36, stemX + width * 1.25, centerY + size * 0.02, stemX, centerY + size * 0.3);
+    ctx.stroke();
+  }
+  ctx.lineCap = "round";
+}
+
+function drawStaff(ctx, headX) {
+  ctx.strokeStyle = "#555555";
+  ctx.lineWidth = 2;
+  for (let line = 0; line < 5; line++) {
+    const y = bottomY - line * gap;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(headX, y); ctx.stroke();
+  }
+  ctx.strokeStyle = "#333333";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(headX + 0.5, 10); ctx.lineTo(headX + 0.5, canvasHeight - 10); ctx.stroke();
+  // пять линеек до пишущей головки и тонкая вертикаль самой головки
+
+  const runs = findRuns(placeItems(headX));
+  for (const run of runs) {
+    const left = run.left + (run.afterPause ? 0 : 1);
+    const right = run.right - 1;
+    const centerY = stepToY(run.staffStep);
+    const top = centerY - half;
+    const bodyWidth = Math.max(right - left, 2);
+
+    ctx.strokeStyle = "#555555";
+    ctx.lineWidth = 2;
+    const overhang = gap * 0.45;
+    for (let s = bottomLineStep - 2; s >= run.staffStep; s -= 2) {
+      ctx.beginPath(); ctx.moveTo(left - overhang, stepToY(s)); ctx.lineTo(Math.min(right + overhang, headX), stepToY(s)); ctx.stroke();
+    }
+    for (let s = bottomLineStep + 10; s <= run.staffStep; s += 2) {
+      ctx.beginPath(); ctx.moveTo(left - overhang, stepToY(s)); ctx.lineTo(Math.min(right + overhang, headX), stepToY(s)); ctx.stroke();
+    }
+    // добавочные линейки с выносом, но не дальше головки
+
+    ctx.fillStyle = "hsl(0, 0%, 13%)";
+    ctx.beginPath();
+    ctx.roundRect(left, top, bodyWidth, gap, Math.min(6, bodyWidth / 2));
+    ctx.fill();
+    if (bodyWidth > 10) {
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 6]);
+      ctx.beginPath(); ctx.moveTo(left + 4, centerY); ctx.lineTo(right - 4, centerY); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // тёмное тело ноты и пунктир нуля
+
+    ctx.strokeStyle = lineColor(run.accidental);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    run.points.forEach((point, i) => {
+      const y = Math.max(top + 2, Math.min(top + gap - 2, centerY - (point.cents / 50) * half));
+      if (i === 0) ctx.moveTo(Math.max(point.x, left + 1), y); else ctx.lineTo(point.x, y);
+    });
+    if (run.points.length === 1) ctx.lineTo(right - 1, Math.max(top + 2, Math.min(top + gap - 2, centerY - (run.points[0].cents / 50) * half)));
+    ctx.stroke();
+    // линия отклонения только внутри своей ноты
+
+    if (run.accidental !== "" && run.afterPause) {
+      drawAccidental(ctx, run.accidental, left - 3, centerY, gap * 0.8, lineColor(run.accidental));
+    }
+  }
+  return runs;
+}
+
+function currentReading(runs) {
+  const last = history[history.length - 1];
+  if (!last || last.type === "pause" || runs.length === 0) return null;
+  const run = runs[runs.length - 1];
+  const centerY = stepToY(run.staffStep);
+  const cents = last.note.cents;
+  return {
+    note: last.note,
+    cents: cents,
+    noteTop: centerY - half,
+    noteBottom: centerY + half,
+    headY: Math.max(centerY - half + 2, Math.min(centerY + half - 2, centerY - (cents / 50) * half))
+  };
+}
+// что звучит прямо сейчас: нота, центы и где на нотоносце стоит головка
+
+function drawFunnel(ctx, headX, current, rightTop, rightBottom) {
+  ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
+  ctx.beginPath();
+  ctx.moveTo(headX, current.noteTop);
+  ctx.lineTo(rightTop.x, rightTop.y);
+  ctx.lineTo(rightBottom.x, rightBottom.y);
+  ctx.lineTo(headX, current.noteBottom);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(headX, current.noteTop); ctx.lineTo(rightTop.x, rightTop.y);
+  ctx.moveTo(headX, current.noteBottom); ctx.lineTo(rightBottom.x, rightBottom.y);
+  ctx.stroke();
+}
+// воронка: от краёв текущей ноты к краям увеличенной шкалы
+
+function drawConnector(ctx, headX, current, endX, endY) {
+  ctx.strokeStyle = centsColor(current.cents);
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(headX, current.headY); ctx.lineTo(endX, endY); ctx.stroke();
+  ctx.fillStyle = centsColor(current.cents);
+  ctx.beginPath(); ctx.arc(headX, current.headY, 4, 0, 2 * Math.PI); ctx.fill();
+}
+// тяга от пишущей точки к метке на шкале
+
+function drawReadout(ctx, x, y, current) {
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  if (!current) {
+    ctx.fillStyle = "#555555";
+    ctx.font = "18px ui-monospace, monospace";
+    ctx.fillText("—", x, y);
+    return;
+  }
+  const sign = current.cents < 0 ? "−" : (current.cents > 0 ? "+" : "");
+  ctx.fillStyle = "#888888";
+  ctx.font = "16px ui-monospace, monospace";
+  ctx.fillText(current.note.octave + " " + current.note.letter + current.note.accidental, x, y - 34);
+  ctx.fillStyle = centsColor(current.cents);
+  ctx.font = "30px ui-monospace, monospace";
+  ctx.fillText(sign + Math.abs(current.cents), x, y);
+}
+// подпись под лупой: октава и нота серым, центы цветом
+
+function drawMagnifier(ctx, headX, zoomX, zoneRight, current) {
+  const top = middleY - zoomHalf;
+  const height = 2 * zoomHalf;
+  const centsToY = (c) => middleY - (Math.max(-50, Math.min(50, c)) / 50) * zoomHalf;
+  if (current) drawFunnel(ctx, headX, current, { x: zoomX, y: top }, { x: zoomX, y: top + height });
+
+  ctx.fillStyle = "hsl(0, 0%, 13%)";
+  ctx.beginPath(); ctx.roundRect(zoomX, top, zoneRight - zoomX, height, 8); ctx.fill();
+  ctx.fillStyle = "hsla(140, 60%, 65%, 0.10)";
+  ctx.fillRect(zoomX, centsToY(inTuneCents), zoneRight - zoomX, centsToY(-inTuneCents) - centsToY(inTuneCents));
+  // увеличенная нота: тёмный прямоугольник и зелёная полоса «строит»
+
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  ctx.font = "12px ui-monospace, monospace";
+  for (let c = -40; c <= 40; c += 10) {
+    const y = centsToY(c);
+    ctx.strokeStyle = c === 0 ? "rgba(255, 255, 255, 0.35)" : "rgba(255, 255, 255, 0.12)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash(c === 0 ? [4, 6] : []);
+    ctx.beginPath(); ctx.moveTo(zoomX + 6, y); ctx.lineTo(zoneRight - 36, y); ctx.stroke();
+    ctx.setLineDash([]);
+    if (c % 20 === 0) {
+      ctx.fillStyle = "#666666";
+      ctx.fillText((c > 0 ? "+" : (c < 0 ? "−" : "")) + Math.abs(c), zoneRight - 6, y);
+    }
+  }
+  // неподвижная шкала: линии через 10 центов, подписи через 20
+
+  if (current) {
+    const y = centsToY(current.cents);
+    drawConnector(ctx, headX, current, zoomX, y);
+    ctx.strokeStyle = centsColor(current.cents);
+    ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(zoomX, y); ctx.lineTo(zoneRight - 36, y); ctx.stroke();
+  }
+  // движется только метка
+  drawReadout(ctx, (zoomX + zoneRight) / 2, canvasHeight - 18, current);
+}
+
+function drawMovingScale(ctx, headX, zoomX, zoneRight, current) {
+  const top = middleY - zoomHalf;
+  const height = 2 * zoomHalf;
+  const cents = current ? current.cents : 0;
+  const rulerY = (c) => middleY - ((c - cents) / 50) * zoomHalf;
+  const clampY = (y) => Math.max(top, Math.min(top + height, y));
+  if (current) drawFunnel(ctx, headX, current, { x: zoomX, y: clampY(rulerY(50)) }, { x: zoomX, y: clampY(rulerY(-50)) });
+
+  ctx.fillStyle = "hsl(0, 0%, 13%)";
+  ctx.beginPath(); ctx.roundRect(zoomX, top, zoneRight - zoomX, height, 8); ctx.fill();
+  ctx.save();
+  ctx.beginPath(); ctx.rect(zoomX, top, zoneRight - zoomX, height); ctx.clip();
+  ctx.fillStyle = "hsla(140, 60%, 65%, 0.10)";
+  ctx.fillRect(zoomX, rulerY(inTuneCents), zoneRight - zoomX, rulerY(-inTuneCents) - rulerY(inTuneCents));
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.font = "13px ui-monospace, monospace";
+  for (let c = -100; c <= 100; c += 5) {
+    const y = rulerY(c);
+    const long = c % 10 === 0;
+    ctx.strokeStyle = c === 0 ? "rgba(255, 255, 255, 0.7)" : (long ? "rgba(255, 255, 255, 0.35)" : "rgba(255, 255, 255, 0.15)");
+    ctx.lineWidth = c === 0 ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(zoomX + 30, y); ctx.lineTo(zoomX + (long ? 80 : 60), y); ctx.stroke();
+    if (long && Math.abs(c) <= 50) {
+      ctx.fillStyle = c === 0 ? "#ffffff" : "#777777";
+      ctx.fillText((c > 0 ? "+" : (c < 0 ? "−" : "")) + Math.abs(c), zoomX + 88, y);
+    }
+  }
+  ctx.restore();
+  // линейка едет так, что текущее отклонение всегда напротив указателя
+
+  if (current) {
+    drawConnector(ctx, headX, current, zoomX, middleY);
+    ctx.fillStyle = centsColor(current.cents);
+    ctx.beginPath();
+    ctx.moveTo(zoomX + 2, middleY - 9); ctx.lineTo(zoomX + 22, middleY); ctx.lineTo(zoomX + 2, middleY + 9);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = centsColor(current.cents);
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(zoomX + 22, middleY); ctx.lineTo(zoneRight - 8, middleY); ctx.stroke();
+  }
+  // неподвижный указатель посередине
+  drawReadout(ctx, (zoomX + zoneRight) / 2, canvasHeight - 18, current);
+}
+
+function drawNeedle(ctx, headX, zoomX, zoneRight, current) {
+  const pivotX = zoneRight - 14;
+  const pivotY = middleY;
+  const length = pivotX - zoomX - 6;
+  const reach = Math.min(zoomHalf, length * 0.8);
+  const tipAt = (c) => {
+    const dy = (Math.max(-50, Math.min(50, c)) / 50) * reach;
+    return { x: pivotX - Math.sqrt(length * length - dy * dy), y: pivotY - dy };
+  };
+  // кончик стрелки ходит по дуге; по высоте он сдвигается ровно пропорционально центам
+
+  if (current) drawFunnel(ctx, headX, current, tipAt(50), tipAt(-50));
+
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = "hsla(140, 60%, 65%, 0.25)";
+  ctx.beginPath();
+  for (let c = -inTuneCents; c <= inTuneCents; c += 1) {
+    const p = tipAt(c);
+    if (c === -inTuneCents) ctx.moveTo(p.x - 10, p.y); else ctx.lineTo(p.x - 10, p.y);
+  }
+  ctx.stroke();
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  ctx.font = "12px ui-monospace, monospace";
+  for (let c = -50; c <= 50; c += 10) {
+    const p = tipAt(c);
+    ctx.strokeStyle = c === 0 ? "rgba(255, 255, 255, 0.7)" : "rgba(255, 255, 255, 0.3)";
+    ctx.lineWidth = c === 0 ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(p.x - 4, p.y); ctx.lineTo(p.x - (c % 50 === 0 || c === 0 ? 18 : 12), p.y); ctx.stroke();
+  }
+  // дуга с делениями через 10 центов и зелёный участок «строит»
+
+  const tip = tipAt(current ? current.cents : 0);
+  if (current) drawConnector(ctx, headX, current, tip.x, tip.y);
+  ctx.strokeStyle = current ? centsColor(current.cents) : "#444444";
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(pivotX, pivotY); ctx.lineTo(tip.x, tip.y); ctx.stroke();
+  ctx.fillStyle = "#888888";
+  ctx.beginPath(); ctx.arc(pivotX, pivotY, 7, 0, 2 * Math.PI); ctx.fill();
+  // стрелка на оси справа; на тишине лежит серой на нуле
+  drawReadout(ctx, (zoomX + zoneRight) / 2, canvasHeight - 18, current);
+}
+
+const variants = [
+  { id: "canvas1", draw: drawMagnifier },
+  { id: "canvas2", draw: drawMovingScale },
+  { id: "canvas3", draw: drawNeedle }
+];
+
+function drawVariant(v) {
+  const canvas = document.getElementById(v.id);
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(canvasHeight * ratio);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, canvasHeight);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  // чёткость на ретине: рисуем в реальных пикселях экрана
+
+  const zoneRight = width - 16;
+  const zoneWidth = Math.max(150, Math.min(260, width * 0.22));
+  const zoomX = zoneRight - zoneWidth;
+  const headX = zoomX - Math.max(50, width * 0.09);
+  // справа налево: лупа, переходная зона с воронкой, лента с пишущей головкой
+
+  const runs = drawStaff(ctx, headX);
+  v.draw(ctx, headX, zoomX, zoneRight, currentReading(runs));
+}
+
+function drawAll() {
+  variants.forEach(drawVariant);
+}
+
+let player = null;
+let micRunning = false;
+
+function testMelody() {
+  const pitches = [];
+  for (let k = 0; k < 60; k++) {
+    pitches.push(60 - 0.20 * Math.exp(-k / 2) - 0.05 + 0.17 * k / 60 + 0.03 * Math.sin(k * 0.8));
+  }
+  for (let k = 0; k < 8; k++) pitches.push(null);
+  for (let k = 0; k < 30; k++) pitches.push(64 + (k >= 10 && k < 20 ? 0.30 : 0.02));
+  for (let k = 0; k < 6; k++) pitches.push(null);
+  for (let k = 0; k < 10; k++) pitches.push(67 + 0.04);
+  for (let k = 0; k < 16; k++) pitches.push(67 + 2 * (k + 1) / 16);
+  for (let k = 0; k < 12; k++) pitches.push(69 - 0.06);
+  for (let k = 0; k < 6; k++) pitches.push(null);
+  for (let k = 0; k < 18; k++) pitches.push(68 - 0.25 + 0.04 * Math.sin(k));
+  for (let k = 0; k < 4; k++) pitches.push(null);
+  for (let k = 0; k < 22; k++) pitches.push(54 + 0.14 - 0.3 * Math.exp(-k / 2));
+  for (let k = 0; k < 10; k++) pitches.push(null);
+  return pitches;
+}
+// длинная нота с заездом и дрейфом; ступенька; глиссандо Соль -> Ля; Ля-бемоль ниже на 25; Фа-диез на добавочных
+
+document.getElementById("test").addEventListener("click", () => {
+  if (micRunning) return;
+  if (player) clearInterval(player);
+  history = [];
+  const pitches = testMelody();
+  let k = 0;
+  document.getElementById("status").textContent = "Test melody is playing.";
+  player = setInterval(() => {
+    if (k >= pitches.length) {
+      clearInterval(player);
+      player = null;
+      document.getElementById("status").textContent = "Test melody finished.";
+      return;
+    }
+    const pitch = pitches[k++];
+    addReading(pitch === null ? null : writtenMidiToNote(pitch));
+  }, 50);
+});
+// тест проигрывается в реальном времени: 20 показаний в секунду, как с микрофона
+
+let recent = [];
+document.getElementById("start").addEventListener("click", async () => {
+  if (micRunning) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (player) { clearInterval(player); player = null; }
+    micRunning = true;
+    history = [];
+    document.getElementById("status").textContent = "Microphone is on.";
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 4096;
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+
+    function update() {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        sum += samples[i] * samples[i];
+      }
+      const loudness = Math.sqrt(sum / samples.length);
+      recent.push(loudness > 0.01 ? detectFrequency(samples, audioContext.sampleRate) : null);
+      if (recent.length >= framesPerReading) {
+        const sounding = recent.filter((value) => value !== null);
+        if (sounding.length > framesPerReading / 2) {
+          addReading(writtenMidiToNote(frequencyToWrittenMidi(median(sounding))));
+        } else {
+          addReading(null);
+        }
+        recent = [];
+      }
+      requestAnimationFrame(update);
+    }
+    update();
+  } catch (error) {
+    document.getElementById("status").textContent = "Error: " + error.name;
+  }
+});
+
+window.addEventListener("resize", drawAll);
+drawAll();
+</script>
+</body>
+</html>
