@@ -138,7 +138,7 @@ function transparent(color, alpha) {
 }
 // тот же цвет, только полупрозрачный: для фона зон в лупе
 
-const scalePoints = [[0, 0], [inTuneCents, 0.6], [warnCents, 0.82], [50, 1]];
+const scalePoints = [[0, 0], [inTuneCents, 1 / 3], [warnCents, 2 / 3], [50, 1]];
 
 function centsToUnit(cents) {
   const size = Math.min(50, Math.abs(cents));
@@ -152,8 +152,8 @@ function centsToUnit(cents) {
   }
   return cents < 0 ? -1 : 1;
 }
-// нелинейная шкала: центы -> доля половины высоты (от −1 до 1). Допуск ±10 занимает 60% высоты,
-// 10–25 ещё 22%, 25–50 последние 18%; внутри каждой зоны равномерно
+// нелинейная шкала: центы -> доля половины высоты (от −1 до 1). Пять зон: красная, рыжая, зелёная, рыжая, красная;
+// рыжая и красная одной высоты, зелёная вдвое выше; внутри каждой зоны равномерно
 
 const zoneBorders = [-warnCents, -inTuneCents, inTuneCents, warnCents];
 
@@ -392,42 +392,47 @@ function drawNameAccidental(ctx, accidental, rightX, capTop, baseline, stem, col
   const cap = baseline - capTop;
   ctx.strokeStyle = color;
   if (accidental === "♯") {
-    const height = cap * 1.3;
-    const width = cap * 0.62;
+    const height = cap * 1.0;
+    const width = cap * 0.5;
     const middle = (capTop + baseline) / 2;
     const left = rightX - width;
     const tilt = height * 0.06;
     ctx.lineCap = "butt";
-    ctx.lineWidth = stem * 0.8 + extra;
+    ctx.lineWidth = stem * 0.6 + extra;
     ctx.beginPath();
     ctx.moveTo(left + width * 0.33, middle - height / 2 + tilt); ctx.lineTo(left + width * 0.33, middle + height / 2);
     ctx.moveTo(left + width * 0.67, middle - height / 2); ctx.lineTo(left + width * 0.67, middle + height / 2 - tilt);
     ctx.stroke();
-    ctx.lineWidth = stem * 1.4 + extra;
+    ctx.lineWidth = stem * 1.05 + extra;
     ctx.beginPath();
     ctx.moveTo(left, middle - height * 0.17 + tilt); ctx.lineTo(rightX, middle - height * 0.17 - tilt);
     ctx.moveTo(left, middle + height * 0.17 + tilt); ctx.lineTo(rightX, middle + height * 0.17 - tilt);
     ctx.stroke();
   } else {
-    const stemX = rightX - cap * 0.5;
+    const stemX = rightX - cap * 0.4;
     ctx.lineCap = "butt";
-    ctx.lineWidth = stem + extra;
+    ctx.lineWidth = stem * 0.75 + extra;
     ctx.beginPath();
-    ctx.moveTo(stemX, capTop - cap * 0.25); ctx.lineTo(stemX, baseline + stem / 2);
+    ctx.moveTo(stemX, capTop - cap * 0.05); ctx.lineTo(stemX, baseline + stem / 2);
     ctx.stroke();
     ctx.lineCap = "round";
-    ctx.lineWidth = stem * 1.1 + extra;
+    ctx.lineWidth = stem * 0.85 + extra;
     ctx.beginPath();
-    ctx.moveTo(stemX, baseline - cap * 0.48);
-    ctx.bezierCurveTo(stemX + cap * 0.62, baseline - cap * 0.78, stemX + cap * 0.68, baseline - cap * 0.22, stemX, baseline);
+    ctx.moveTo(stemX, baseline - cap * 0.4);
+    ctx.bezierCurveTo(stemX + cap * 0.5, baseline - cap * 0.64, stemX + cap * 0.55, baseline - cap * 0.18, stemX, baseline);
     ctx.stroke();
   }
   ctx.lineCap = "round";
 }
-// знак у имени ноты: той же толщины, что и буквы; диез чуть выше букв и по их середине,
-// у бемоля палочка выше букв, а низ кружка стоит на нижней линии букв
+// знак у имени ноты: чуть тоньше букв и ростом с заглавную букву; диез по середине букв,
+// у бемоля палочка до верха букв, а низ кружка стоит на нижней линии букв
 
-function drawNoteName(ctx, centerX, centerY, size, outline) {
+function displayOctave(note) {
+  return note.octave - 3;
+}
+// октава по-нашему: Соль на второй линейке — Соль 1, над нотоносцем — Соль 2 (первая октава = 1)
+
+function drawNoteName(ctx, centerX, centerY, size, outline, signCenterX, octaveCenterX) {
   const note = currentNote();
   if (note === null) return;
   ctx.font = size + "px ui-monospace, monospace";
@@ -437,19 +442,18 @@ function drawNoteName(ctx, centerX, centerY, size, outline) {
   const inkWidth = box.actualBoundingBoxLeft + box.actualBoundingBoxRight;
   const capHeight = box.actualBoundingBoxAscent;
   const inkLeft = centerX - inkWidth / 2;
-  const inkRight = centerX + inkWidth / 2;
   const baseline = centerY + capHeight / 2;
   const x = inkLeft + box.actualBoundingBoxLeft;
   const stem = size * 0.085;
-  const outlineWidth = size * 0.14;
+  const outlineWidth = size * 0.06;
   // меряем сами буквы (а не клетку шрифта) и ставим их середину ровно в centerX, centerY; stem — толщина штриха букв
 
   if (note.accidental !== "") {
-    const signRight = inkLeft - size * 0.12;
+    const signRight = signCenterX + capHeight * 0.25;
     drawNameAccidental(ctx, note.accidental, signRight, baseline - capHeight, baseline, stem, outline, outlineWidth);
     drawNameAccidental(ctx, note.accidental, signRight, baseline - capHeight, baseline, stem, "#ffffff", 0);
   }
-  // знак перед нотой: сначала тёмная обводка, потом белый, как у букв
+  // знак на своём постоянном месте слева, не зависит от длины названия
 
   ctx.lineJoin = "round";
   ctx.lineWidth = outlineWidth;
@@ -457,14 +461,19 @@ function drawNoteName(ctx, centerX, centerY, size, outline) {
   ctx.strokeText(note.letter, x, baseline);
   ctx.fillStyle = "#ffffff";
   ctx.fillText(note.letter, x, baseline);
-  // буквы с тёмной обводкой, чтобы читались поверх метки
+  // буквы с тонкой тёмной обводкой, чтобы читались поверх метки
 
-  const octaveSize = Math.round(size * 0.4);
-  ctx.font = octaveSize + "px ui-monospace, monospace";
-  const octaveBox = ctx.measureText(String(note.octave));
-  ctx.fillStyle = "#888888";
-  ctx.fillText(note.octave, inkRight + size * 0.06 + octaveBox.actualBoundingBoxLeft, baseline - capHeight + octaveBox.actualBoundingBoxAscent);
-  // октава справа сверху, как степень: её верх на уровне верха букв
+  const octaveText = String(displayOctave(note));
+  ctx.font = Math.round(size * 0.5) + "px ui-monospace, monospace";
+  const octaveBox = ctx.measureText(octaveText);
+  const octaveInk = octaveBox.actualBoundingBoxLeft + octaveBox.actualBoundingBoxRight;
+  const octaveX = octaveCenterX - octaveInk / 2 + octaveBox.actualBoundingBoxLeft;
+  const octaveBaseline = centerY + octaveBox.actualBoundingBoxAscent / 2;
+  ctx.lineWidth = outlineWidth;
+  ctx.strokeText(octaveText, octaveX, octaveBaseline);
+  ctx.fillStyle = "#bbbbbb";
+  ctx.fillText(octaveText, octaveX, octaveBaseline);
+  // номер октавы на своём постоянном месте справа, по середине высоты букв
 }
 // в тишине имени нет
 
@@ -560,7 +569,7 @@ function drawMagnifier(ctx, headX, zoomX, zoneRight, scheme, textInside) {
 
   if (textInside) {
     const centerX = zoomX + width / 2;
-    drawNoteName(ctx, centerX, middleY - 6, 62, "hsl(0, 0%, 12%)");
+    drawNoteName(ctx, centerX, middleY, 54, "hsl(0, 0%, 12%)", zoomX + width * 0.13, zoneRight - labelWidth - 14);
     drawCentsNumber(ctx, centerX, top + height - 14, 18, scheme);
     drawHertz(ctx, centerX, top - 16, 16);
   }
@@ -586,7 +595,7 @@ function drawLayout(layout, scheme) {
   // чёткость на ретине: рисуем в реальных пикселях экрана
 
   const textWidth = layout.text === "side" ? 140 : 0;
-  const scaleWidth = layout.scale === "narrow" ? Math.max(90, Math.min(120, width * 0.1)) : Math.max(180, Math.min(240, width * 0.2));
+  const scaleWidth = layout.scale === "narrow" ? Math.max(90, Math.min(120, width * 0.1)) : Math.max(200, Math.min(260, width * 0.22));
   const zoomX = width - textWidth - scaleWidth;
   const scaleRight = zoomX + scaleWidth;
   const headX = zoomX - Math.max(40, width * 0.06);
