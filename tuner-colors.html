@@ -53,9 +53,13 @@ const letterSteps = [0, 0, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6];
 const referenceA = 442;
 const transposition = 7;
 const inTuneCents = 10;
-const framesPerReading = 12;
-const framesPerStaffReading = 3;
-// framesPerReading: для крупной ноты сверху, как в пене; framesPerStaffReading: для ленты, ей нужно чаще
+const minLoudness = 0.01;
+const minClarity = 0.8;
+const smoothingFrames = 7;
+const minNoteFrames = 12;
+const centsEveryFrames = 8;
+// тише 0.01 — тишина; «чистота» ниже 0.8 — шум, а не нота; сглаживание — скользящая медиана 7 кадров;
+// нота попадает на ленту, только если продержалась 12 кадров (0.2 с: окно анализа само растягивает звук на 0.09 с, так что отсекаются звуки короче 0.1 с); число центов сверху обновляется раз в 8 кадров
 
 function writtenMidiToNote(writtenMidi) {
   const midi = Math.round(writtenMidi);
@@ -91,8 +95,14 @@ function detectFrequency(samples, sampleRate) {
     }
     if (score > bestScore) { bestScore = score; bestLag = lag; }
   }
-  return sampleRate / bestLag;
+  if (bestLag === 0) return { frequency: 0, clarity: 0 };
+  let energy = 0;
+  for (let i = 0; i < samples.length - bestLag; i++) {
+    energy += samples[i] * samples[i] + samples[i + bestLag] * samples[i + bestLag];
+  }
+  return { frequency: sampleRate / bestLag, clarity: 2 * bestScore / energy };
 }
+// чистота: 1 — волна через найденный сдвиг повторяется точно (нота), ближе к 0 — не повторяется (шум)
 
 function median(values) {
   const sorted = values.slice().sort((a, b) => a - b);
@@ -160,17 +170,21 @@ const signText = document.getElementById("sign");
 const centsNumber = document.getElementById("centsNumber");
 const hertzText = document.getElementById("hertz");
 
-function showNote(frequency) {
-  const note = writtenMidiToNote(frequencyToWrittenMidi(frequency));
+function showNote(note) {
   noteBox.classList.remove("silent");
   letterText.textContent = note.letter;
   accidentalText.textContent = note.accidental;
   octaveText.textContent = note.octave;
+}
+// имя ноты: каждый кадр
+
+function showCents(note, frequency) {
   signText.textContent = note.cents < 0 ? "−" : (note.cents > 0 ? "+" : "");
   centsNumber.textContent = Math.abs(note.cents);
   centsText.style.color = centsColor(note.cents);
   hertzText.textContent = frequency.toFixed(1) + " Hz";
 }
+// число центов и герцы: реже, чтобы успевать прочитать
 
 function showSilence() {
   noteBox.classList.add("silent");
@@ -186,30 +200,57 @@ const half = gap / 2;
 const bottomY = 250;
 const middleY = bottomY - 2 * gap;
 const bottomLineStep = 4 * 7 + 2;
-const stepX = 4;
+const stepX = 4 / 3;
 const pauseSteps = Math.round(2.5 * gap / stepX);
-const signRoomSteps = 5;
+const signRoomSteps = Math.round(15 / stepX);
 const zoomHalf = 110;
 const stepToY = (staffStep) => bottomY - (staffStep - bottomLineStep) * half;
-// пауза растёт по одному шагу, пока не станет 2.5 расстояния между линейками; если перед нотой тишина хотя бы 5 шагов, знак встаёт в неё, иначе внутрь начала ноты
+// лента пишет каждый кадр, 4/3 px на кадр (80 px в секунду); пауза растёт до 2.5 расстояния между линейками;
+// если перед нотой тишина хотя бы 15 px, знак встаёт в неё, иначе внутрь начала ноты
 
 let history = [];
-// лента: { type: "note", note } или { type: "silent" }
+let confirmedKey = null;
+let pending = [];
+// лента: { type: "note", note } или { type: "silent" }; confirmedKey — нота, которая сейчас подтверждена;
+// pending — кадры новой ноты, которая ещё не продержалась нужное время
 
-function addReading(note) {
-  if (note === null) {
-    if (history.length === 0) return;
-    let silent = 0;
-    for (let i = history.length - 1; i >= 0 && history[i].type === "silent"; i--) silent++;
-    if (silent >= pauseSteps) return;
-    history.push({ type: "silent" });
-  } else {
-    history.push({ type: "note", note: note });
-  }
-  if (history.length > 3000) history.shift();
-  drawAll();
+const noteKey = (note) => note.staffStep + note.accidental;
+
+function trimPause() {
+  let silent = 0;
+  for (let i = history.length - 1; i >= 0 && history[i].type === "silent"; i--) silent++;
+  while (silent > pauseSteps) { history.pop(); silent--; }
 }
-// тишина тянет ленту пустотой; когда пустота дошла до размера паузы, лента стоит
+// хвост тишины не длиннее паузы: дальше лента стоит
+
+function addFrame(note) {
+  if (note === null) {
+    confirmedKey = null;
+    pending = [];
+    if (history.length > 0) history.push({ type: "silent" });
+    trimPause();
+  } else if (noteKey(note) === confirmedKey) {
+    history.push({ type: "note", note: note });
+  } else {
+    confirmedKey = null;
+    if (pending.length > 0 && noteKey(pending[0]) !== noteKey(note)) {
+      pending = [];
+      trimPause();
+    }
+    pending.push(note);
+    history.push({ type: "silent" });
+    if (pending.length >= minNoteFrames) {
+      for (let k = 0; k < pending.length; k++) {
+        history[history.length - pending.length + k] = { type: "note", note: pending[k] };
+      }
+      confirmedKey = noteKey(note);
+      pending = [];
+    }
+  }
+  if (history.length > 4000) history.shift();
+}
+// новая нота сначала пишется на ленту пустотой; продержалась 12 кадров — пустота задним числом превращается в ноту;
+// не продержалась — так и остаётся пустотой, поэтому короткие обрывки и шум на ленту не попадают
 
 function findRuns(headX) {
   const firstIndex = Math.max(0, history.length - Math.ceil(headX / stepX) - 1);
@@ -311,20 +352,29 @@ function drawRuns(ctx, runs, headX, scheme) {
 
     ctx.lineWidth = 3;
     let previous = null;
+    let color = null;
     for (const point of run.points) {
       if (point.x < bodyLeft + 1) continue;
-      ctx.strokeStyle = zoneColor(point.cents, scheme);
-      ctx.beginPath();
-      if (previous) {
-        ctx.moveTo(previous.x, clampY(previous.cents));
-      } else {
+      const pointColor = zoneColor(point.cents, scheme);
+      if (previous === null) {
+        ctx.beginPath();
         ctx.moveTo(Math.max(point.x - stepX / 2, bodyLeft + 1), clampY(point.cents));
+        color = pointColor;
+      } else if (pointColor !== color) {
+        ctx.strokeStyle = color;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(previous.x, clampY(previous.cents));
+        color = pointColor;
       }
       ctx.lineTo(point.x, clampY(point.cents));
-      ctx.stroke();
       previous = point;
     }
-    // линию рисуем кусочками: каждый кусочек своим цветом по зоне отклонения
+    if (previous !== null) {
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    }
+    // линия идёт кусками одного цвета: новый кусок начинается, только когда меняется зона отклонения
 
     if (run.accidental !== "") {
       drawAccidental(ctx, run.accidental, bodyLeft - 3, centerY, signSize, signColor(run.accidental));
@@ -539,7 +589,7 @@ document.getElementById("start").addEventListener("click", async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     micSource = audioContext.createMediaStreamSource(stream);
     if (!testPlaying) micSource.connect(analyser);
-    history = [];
+    history = []; confirmedKey = null; pending = [];
     drawAll();
     statusText.textContent = "Microphone is on.";
   } catch (error) {
@@ -553,11 +603,11 @@ document.getElementById("test").addEventListener("click", () => {
   audioContext.resume();
   testPlaying = true;
   if (micSource) micSource.disconnect();
-  history = [];
+  history = []; confirmedKey = null; pending = [];
   drawAll();
 
   const pitches = testMelody();
-  const step = framesPerStaffReading / 60;
+  const step = 0.05;
   const start = audioContext.currentTime + 0.1;
   const real = new Float32Array([0, 0, 0, 0, 0, 0, 0, 0]);
   const imag = new Float32Array([0, 1, 0.7, 0.5, 0.35, 0.2, 0.12, 0.08]);
@@ -597,8 +647,8 @@ document.getElementById("test").addEventListener("click", () => {
   // в конце возвращаем микрофон, если он был включён
 });
 
-let recent = [];
-let staffRecent = [];
+let frames = [];
+let frameCount = 0;
 
 function update() {
   analyser.getFloatTimeDomainData(samples);
@@ -608,32 +658,30 @@ function update() {
   }
   const loudness = Math.sqrt(sum / samples.length);
   bar.style.width = Math.min(100, loudness * 500) + "%";
-  const frequency = loudness > 0.01 ? detectFrequency(samples, audioContext.sampleRate) : null;
-  // громкость и частота считаются один раз за кадр, дальше их берут и нота сверху, и лента
+  let frequency = null;
+  if (loudness > minLoudness) {
+    const result = detectFrequency(samples, audioContext.sampleRate);
+    if (result.clarity >= minClarity) frequency = result.frequency;
+  }
+  // громко и чисто — частота; иначе — тишина
 
-  if (frequency !== null) {
-    recent.push(frequency);
-    if (recent.length >= framesPerReading) {
-      showNote(median(recent));
-      recent = [];
-    }
+  frames.push(frequency);
+  if (frames.length > smoothingFrames) frames.shift();
+  const sounding = frames.filter((value) => value !== null);
+  const smoothed = sounding.length > smoothingFrames / 2 ? median(sounding) : null;
+  addFrame(smoothed === null ? null : writtenMidiToNote(frequencyToWrittenMidi(smoothed)));
+  // скользящая медиана последних 7 кадров считается каждый кадр и сразу идёт на ленту
+
+  frameCount++;
+  if (confirmedKey !== null) {
+    const note = history[history.length - 1].note;
+    showNote(note);
+    if (frameCount % centsEveryFrames === 0 || centsNumber.textContent === "") showCents(note, smoothed);
   } else {
     showSilence();
-    recent = [];
   }
-  // нота сверху: как в пене, медиана 12 кадров
-
-  staffRecent.push(frequency);
-  if (staffRecent.length >= framesPerStaffReading) {
-    const sounding = staffRecent.filter((value) => value !== null);
-    if (sounding.length > framesPerStaffReading / 2) {
-      addReading(writtenMidiToNote(frequencyToWrittenMidi(median(sounding))));
-    } else {
-      addReading(null);
-    }
-    staffRecent = [];
-  }
-  // лента: медиана 3 кадров, если звучало больше половины из них
+  drawAll();
+  // нота сверху, лента и лупа — каждый кадр; число центов — раз в 8 кадров
 
   requestAnimationFrame(update);
 }
