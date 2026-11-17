@@ -428,7 +428,7 @@ function displayOctave(note) {
 }
 // октава по-нашему: Соль на второй линейке — Соль 1, над нотоносцем — Соль 2 (первая октава = 1)
 
-function drawNoteName(ctx, centerX, centerY, size, outline, signCenterX, octaveCenterX) {
+function drawNoteName(ctx, centerX, centerY, size, outline) {
   const note = currentNote();
   if (note === null) return;
   ctx.font = size + "px ui-monospace, monospace";
@@ -442,6 +442,11 @@ function drawNoteName(ctx, centerX, centerY, size, outline, signCenterX, octaveC
   const x = inkLeft + box.actualBoundingBoxLeft;
   const stem = size * 0.085;
   const outlineWidth = size * 0.06;
+  const widest = ctx.measureText("Sol");
+  const widestHalf = (widest.actualBoundingBoxLeft + widest.actualBoundingBoxRight) / 2;
+  const signCenterX = centerX - widestHalf - size * 0.3;
+  const octaveCenterX = centerX + widestHalf + size * 0.36;
+  // места знака и октавы постоянные: сразу за краями самого длинного названия (Sol), поэтому не пляшут
   // меряем сами буквы (а не клетку шрифта) и ставим их середину ровно в centerX, centerY; stem — толщина штриха букв
 
   if (note.accidental !== "") {
@@ -467,7 +472,7 @@ function drawNoteName(ctx, centerX, centerY, size, outline, signCenterX, octaveC
   const octaveBaseline = centerY + octaveBox.actualBoundingBoxAscent / 2;
   ctx.lineWidth = outlineWidth;
   ctx.strokeText(octaveText, octaveX, octaveBaseline);
-  ctx.fillStyle = "#bbbbbb";
+  ctx.fillStyle = "#ffffff";
   ctx.fillText(octaveText, octaveX, octaveBaseline);
   // номер октавы на своём постоянном месте справа, по середине высоты букв
 }
@@ -565,7 +570,7 @@ function drawMagnifier(ctx, headX, zoomX, zoneRight, scheme, textInside) {
 
   if (textInside) {
     const centerX = zoomX + width / 2;
-    drawNoteName(ctx, centerX, middleY, 54, "hsl(0, 0%, 12%)", zoomX + width * 0.13, zoneRight - labelWidth - 14);
+    drawNoteName(ctx, centerX, middleY, 54, "hsl(0, 0%, 12%)");
     drawCentsNumber(ctx, centerX, top + height - 14, 18, scheme);
     drawHertz(ctx, centerX, top - 16, 16);
   }
