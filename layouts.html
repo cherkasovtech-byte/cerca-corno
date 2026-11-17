@@ -347,32 +347,53 @@ function drawRuns(ctx, runs, headX, scheme) {
   }
 }
 
-function drawNoteName(ctx, centerX, centerY, size) {
+function drawNoteName(ctx, centerX, centerY, size, outline) {
   const note = currentNote();
-  ctx.textBaseline = "middle";
   if (note === null) {
     ctx.strokeStyle = "#888888";
     ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(centerX, centerY, size * 0.2, 0, 2 * Math.PI); ctx.stroke();
+    ctx.beginPath(); ctx.arc(centerX, centerY, size * 0.16, 0, 2 * Math.PI); ctx.stroke();
     return;
   }
   ctx.font = size + "px ui-monospace, monospace";
-  const halfName = ctx.measureText(note.letter).width / 2;
-  ctx.fillStyle = "#ffffff";
-  ctx.textAlign = "center";
-  ctx.fillText(note.letter, centerX, centerY);
-  ctx.font = Math.round(size * 0.42) + "px ui-monospace, monospace";
-  ctx.fillStyle = "#888888";
-  ctx.textAlign = "right";
-  ctx.fillText(note.octave, centerX - halfName - size * 0.08, centerY);
-  if (note.accidental !== "") {
-    ctx.font = Math.round(size * 0.6) + "px ui-monospace, monospace";
-    ctx.fillStyle = "#ffffff";
-    ctx.textAlign = "left";
-    ctx.fillText(note.accidental, centerX + halfName + size * 0.05, centerY);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  const box = ctx.measureText(note.letter);
+  const inkWidth = box.actualBoundingBoxLeft + box.actualBoundingBoxRight;
+  const capHeight = box.actualBoundingBoxAscent;
+  const inkLeft = centerX - inkWidth / 2;
+  const inkRight = centerX + inkWidth / 2;
+  const baseline = centerY + capHeight / 2;
+  const x = inkLeft + box.actualBoundingBoxLeft;
+  // меряем сами буквы (а не клетку шрифта) и ставим их середину ровно в centerX, centerY
+
+  if (outline) {
+    ctx.lineJoin = "round";
+    ctx.lineWidth = size * 0.14;
+    ctx.strokeStyle = outline;
+    ctx.strokeText(note.letter, x, baseline);
   }
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(note.letter, x, baseline);
+  // тёмная обводка, чтобы буквы читались поверх метки
+
+  const octaveSize = Math.round(size * 0.4);
+  ctx.font = octaveSize + "px ui-monospace, monospace";
+  const octaveBox = ctx.measureText(String(note.octave));
+  ctx.fillStyle = "#888888";
+  ctx.fillText(note.octave, inkRight + size * 0.06 + octaveBox.actualBoundingBoxLeft, baseline - capHeight + octaveBox.actualBoundingBoxAscent);
+  // октава справа сверху, как степень: её верх на уровне верха букв
+
+  if (note.accidental === "♯") {
+    const signSize = capHeight * 1.4;
+    drawAccidental(ctx, "♯", inkLeft - size * 0.14, centerY, signSize, "#ffffff");
+  } else if (note.accidental === "♭") {
+    const signSize = capHeight * 1.35;
+    drawAccidental(ctx, "♭", inkLeft - size * 0.14, baseline - 0.3 * signSize, signSize, "#ffffff");
+  }
+  // знак перед нотой, нарисован линиями: диез по середине букв, у бемоля низ кружка на линии букв
 }
-// имя ноты по центру, октава серым слева, знак справа (как в пене); в тишине кружок
+// в тишине вместо имени кружок
 
 function drawCentsNumber(ctx, centerX, centerY, size, scheme) {
   if (shownCents === null) return;
@@ -388,11 +409,11 @@ function drawCentsNumber(ctx, centerX, centerY, size, scheme) {
 }
 // число центов цветом зоны (как метка в лупе); знак висит слева и не сдвигает число
 
-function drawHertz(ctx, centerX, centerY) {
+function drawHertz(ctx, centerX, centerY, size) {
   if (shownHertz === null) return;
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
-  ctx.font = "11px ui-monospace, monospace";
+  ctx.font = size + "px ui-monospace, monospace";
   ctx.fillStyle = "#888888";
   ctx.fillText(shownHertz.toFixed(1) + " Hz", centerX, centerY);
 }
@@ -457,22 +478,20 @@ function drawMagnifier(ctx, headX, zoomX, zoneRight, scheme, textInside) {
   }
   // подписи только на границах зон; ноль и так виден по пунктиру
 
-  if (textInside) {
-    const centerX = zoomX + (width - labelWidth) / 2;
-    ctx.globalAlpha = 0.85;
-    drawNoteName(ctx, centerX, middleY - 8, 46);
-    ctx.globalAlpha = 1;
-    drawCentsNumber(ctx, centerX, top + height - 14, 18, scheme);
-    drawHertz(ctx, centerX, top + 11);
-  }
-  // вариант 2: имя ноты, центы и герцы прямо на шкале, под меткой
-
   if (current) {
     ctx.strokeStyle = levelColor(current.cents, scheme);
     ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(zoomX, centsToY(current.cents)); ctx.lineTo(zoneRight - labelWidth, centsToY(current.cents)); ctx.stroke();
   }
   // движется только метка
+
+  if (textInside) {
+    const centerX = zoomX + width / 2;
+    drawNoteName(ctx, centerX, middleY - 6, 62, "hsl(0, 0%, 12%)");
+    drawCentsNumber(ctx, centerX, top + height - 14, 18, scheme);
+    drawHertz(ctx, centerX, top - 16, 16);
+  }
+  // вариант 2: имя ноты поверх метки, по центру всей шкалы; центы внизу шкалы; герцы над шкалой
 }
 
 const layouts = [
@@ -510,22 +529,22 @@ function drawLayout(layout, scheme) {
   }
   ctx.strokeStyle = "#333333";
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(headX + 0.5, 10); ctx.lineTo(headX + 0.5, canvasHeight - 10); ctx.stroke();
-  // пять линеек до головки и тонкая вертикаль самой головки
+  ctx.beginPath(); ctx.moveTo(headX + 0.5, bottomY - 4 * gap); ctx.lineTo(headX + 0.5, bottomY); ctx.stroke();
+  // пять линеек до головки и тонкая вертикаль самой головки, только в пределах нотоносца
 
   drawRuns(ctx, findRuns(headX), headX, scheme);
   drawMagnifier(ctx, headX, zoomX, scaleRight, scheme, layout.text === "inside");
 
   if (layout.text === "side") {
     const centerX = scaleRight + textWidth / 2;
-    drawNoteName(ctx, centerX, middleY - 18, 40);
+    drawNoteName(ctx, centerX, middleY - 18, 44);
     drawCentsNumber(ctx, centerX, middleY + 28, 24, scheme);
-    drawHertz(ctx, centerX, middleY + 52);
+    drawHertz(ctx, centerX, middleY + 52, 12);
   }
   if (layout.text === "above") {
     const centerX = zoomX + scaleWidth / 2;
     const top = middleY - zoomHalf;
-    drawNoteName(ctx, centerX, top - 50, 36);
+    drawNoteName(ctx, centerX, top - 58, 40);
     drawCentsNumber(ctx, centerX, top - 16, 20, scheme);
   }
   // вариант 1: нота справа от шкалы; вариант 3: над шкалой
