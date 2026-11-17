@@ -44,10 +44,7 @@
 <button id="test">Test melody</button>
 <p id="status">Microphone is off.</p>
 
-<h2>A · white → orange → red</h2>
 <canvas id="staffA"></canvas>
-<h2>B · white → light blue / pink → bright blue / pink</h2>
-<canvas id="staffB"></canvas>
 
 <script>
 const noteLetters = ["Do", "Do", "Re", "Mi", "Mi", "Fa", "Fa", "Sol", "La", "La", "Si", "Si"];
@@ -129,10 +126,9 @@ function noteBackground(accidental) {
 // фон ноты: бемоль голубоватый, диез розоватый, остальные серые (чуть светлее, чем было)
 
 const schemes = {
-  orange: { warnLow: "hsl(32, 95%, 60%)", warnHigh: "hsl(32, 95%, 60%)", badLow: "hsl(0, 85%, 58%)", badHigh: "hsl(0, 85%, 58%)" },
-  bluepink: { warnLow: "hsl(205, 75%, 82%)", warnHigh: "hsl(340, 75%, 86%)", badLow: "hsl(210, 100%, 58%)", badHigh: "hsl(335, 100%, 60%)" }
+  orange: { warnLow: "hsl(32, 95%, 60%)", warnHigh: "hsl(32, 95%, 60%)", badLow: "hsl(0, 85%, 58%)", badHigh: "hsl(0, 85%, 58%)" }
 };
-// два варианта цвета для второго окна (10–25 центов) и для всего, что дальше 25
+// цвет для второго окна (10–25 центов) и для всего, что дальше 25
 
 function zoneColor(cents, scheme) {
   const s = schemes[scheme];
@@ -438,9 +434,8 @@ function drawStaff(canvasId, scheme) {
 
 function drawAll() {
   drawStaff("staffA", "orange");
-  drawStaff("staffB", "bluepink");
 }
-// два варианта раскраски по одной и той же ленте
+// рисуем выбранный вариант раскраски
 
 function testMelody() {
   const pitches = [];
