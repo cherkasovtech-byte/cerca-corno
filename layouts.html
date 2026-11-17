@@ -33,7 +33,7 @@ const referenceA = 442;
 const transposition = 7;
 const inTuneCents = 10;
 const minLoudness = 0.01;
-const minClarity = 0.8;
+const minClarity = 0.7;
 const smoothingFrames = 7;
 const minNoteFrames = 12;
 const centsEveryFrames = 8;
@@ -180,11 +180,11 @@ let shownHertz = null;
 // число центов и герцы: обновляются раз в 8 кадров, чтобы успевать прочитать
 
 function setStatus(text) {
-  document.querySelectorAll(".status").forEach((element) => { element.textContent = text; });
+  document.querySelectorAll(".status:not(.debug)").forEach((element) => { element.textContent = text; });
 }
 
 function currentNote() {
-  return confirmedKey !== null ? history[history.length - 1].note : null;
+  return soundOn ? history[history.length - 1].note : null;
 }
 // нота, которая звучит прямо сейчас (или null)
 
@@ -204,10 +204,10 @@ const stepToY = (staffStep) => bottomY - (staffStep - bottomLineStep) * half;
 // если перед нотой тишина хотя бы 15 px, знак встаёт в неё, иначе внутрь начала ноты
 
 let history = [];
-let confirmedKey = null;
+let soundOn = false;
 let pending = [];
-// лента: { type: "note", note } или { type: "silent" }; confirmedKey — нота, которая сейчас подтверждена;
-// pending — кадры новой ноты, которая ещё не продержалась нужное время
+// лента: { type: "note", note } или { type: "silent" }; soundOn — звук уже подтверждён и пишется;
+// pending — кадры нового звука, который ещё не продержался нужное время
 
 const noteKey = (note) => note.staffStep + note.accidental;
 
@@ -220,32 +220,28 @@ function trimPause() {
 
 function addFrame(note) {
   if (note === null) {
-    confirmedKey = null;
+    soundOn = false;
     pending = [];
     if (history.length > 0) history.push({ type: "silent" });
     trimPause();
-  } else if (noteKey(note) === confirmedKey) {
+  } else if (soundOn) {
     history.push({ type: "note", note: note });
   } else {
-    confirmedKey = null;
-    if (pending.length > 0 && noteKey(pending[0]) !== noteKey(note)) {
-      pending = [];
-      trimPause();
-    }
     pending.push(note);
     history.push({ type: "silent" });
     if (pending.length >= minNoteFrames) {
       for (let k = 0; k < pending.length; k++) {
         history[history.length - pending.length + k] = { type: "note", note: pending[k] };
       }
-      confirmedKey = noteKey(note);
+      soundOn = true;
       pending = [];
     }
   }
   if (history.length > 4000) history.shift();
 }
-// новая нота сначала пишется на ленту пустотой; продержалась 12 кадров — пустота задним числом превращается в ноту;
-// не продержалась — так и остаётся пустотой, поэтому короткие обрывки и шум на ленту не попадают
+// новый звук сначала пишется на ленту пустотой; продержался 12 кадров без перерыва — пустота задним числом
+// превращается в ноты; не продержался — остаётся пустотой. Проверяем непрерывность звука, а не одну и ту же ноту:
+// так проходят глиссандо и вибрато, а короткие обрывки и шум — нет
 
 function findRuns(headX) {
   const firstIndex = Math.max(0, history.length - Math.ceil(headX / stepX) - 1);
@@ -729,7 +725,7 @@ async function startMicrophone() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     micSource = audioContext.createMediaStreamSource(stream);
     if (!testPlaying) micSource.connect(analyser);
-    history = []; confirmedKey = null; pending = [];
+    history = []; soundOn = false; pending = [];
     drawAll();
     setStatus("Microphone is on.");
   } catch (error) {
@@ -743,7 +739,7 @@ function playTestMelody() {
   audioContext.resume();
   testPlaying = true;
   if (micSource) micSource.disconnect();
-  history = []; confirmedKey = null; pending = [];
+  history = []; soundOn = false; pending = [];
   drawAll();
 
   const pitches = testMelody();
@@ -799,9 +795,11 @@ function update() {
   const loudness = Math.sqrt(sum / samples.length);
   document.querySelectorAll(".fill").forEach((fill) => { fill.style.width = Math.min(100, loudness * 500) + "%"; });
   let frequency = null;
+  let clarity = null;
   if (loudness > minLoudness) {
     const result = detectFrequency(samples, audioContext.sampleRate);
-    if (result.clarity >= minClarity) frequency = result.frequency;
+    clarity = result.clarity;
+    if (clarity >= minClarity) frequency = result.frequency;
   }
   // громко и чисто — частота; иначе — тишина
 
@@ -813,7 +811,13 @@ function update() {
   // скользящая медиана последних 7 кадров считается каждый кадр и сразу идёт на ленту
 
   frameCount++;
-  if (confirmedKey === null) {
+  if (frameCount % centsEveryFrames === 0) {
+    const text = "level " + loudness.toFixed(3) + " (min " + minLoudness + ") · clarity " + (clarity === null ? "—" : clarity.toFixed(2)) + " (min " + minClarity + ")";
+    document.querySelectorAll(".debug").forEach((element) => { element.textContent = text; });
+  }
+  // временная строка для настройки: громкость и чистота прямо сейчас и пороги
+
+  if (!soundOn) {
     shownCents = null;
     shownHertz = null;
   } else if (frameCount % centsEveryFrames === 0 || shownCents === null) {
@@ -831,7 +835,8 @@ for (const n of [2]) {
     '<div class="meter"><div class="fill"></div></div>' +
     '<button class="start">Microphone</button>' +
     '<button class="test">Test melody</button>' +
-    '<p class="status">Microphone is off.</p>';
+    '<p class="status">Microphone is off.</p>' +
+    '<p class="status debug"></p>';
 }
 document.querySelectorAll(".start").forEach((button) => button.addEventListener("click", startMicrophone));
 document.querySelectorAll(".test").forEach((button) => button.addEventListener("click", playTestMelody));
