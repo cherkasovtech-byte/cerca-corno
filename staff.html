@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chi cerca il corno: staff prototype 3</title>
+<style>
+  :root { --black: #000000; --white: #ffffff; --grey: #888888; --dark: #222222; --font: ui-monospace, monospace; }
+  body { background: var(--black); color: var(--white); font-family: var(--font); margin: 0; padding: 24px 0; text-align: center; }
+  h1 { font-size: 20px; font-weight: normal; margin: 0 0 6px; }
+  h2 { font-size: 15px; font-weight: normal; color: var(--grey); margin: 28px 0 4px; }
+  canvas { display: block; width: 100%; }
+  button { background: transparent; color: var(--white); border: 1px solid var(--white); font: inherit; font-size: 14px; padding: 6px 12px; margin: 10px 6px 0; cursor: pointer; }
+  button:hover { background: var(--white); color: var(--black); }
+  #status { color: var(--grey); font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>Chi cerca il corno</h1>
+<button id="test">Test melody</button>
+<button id="start">Start microphone</button>
+<p id="status">Test melody: long note, steps, slide through neighbour notes, low notes.</p>
+
+<canvas id="canvas1" height="350"></canvas>
+
+<script>
+const noteLetters = ["Do", "Do", "Re", "Mi", "Mi", "Fa", "Fa", "Sol", "La", "La", "Si", "Si"];
+const noteAccidentals = ["", "♯", "", "♭", "", "", "♯", "", "♭", "", "♭", ""];
+const letterSteps = [0, 0, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6];
+const referenceA = 442;
+const transposition = 7;
+const framesPerReading = 3;
+
+function writtenMidiToNote(writtenMidi) {
+  const midi = Math.round(writtenMidi);
+  const octave = Math.floor(midi / 12) - 1;
+  return {
+    letter: noteLetters[midi % 12],
+    accidental: noteAccidentals[midi % 12],
+    octave: octave,
+    cents: Math.round(100 * (writtenMidi - midi)),
+    staffStep: octave * 7 + letterSteps[midi % 12]
+  };
+}
+// написанная высота (дробный номер MIDI) -> нота, центы и ступень на нотоносце
+
+function frequencyToWrittenMidi(frequency) {
+  return 69 + 12 * Math.log2(frequency / referenceA) + transposition;
+}
+
+function detectFrequency(samples, sampleRate) {
+  const minLag = Math.floor(sampleRate / 1000);
+  const maxLag = Math.floor(sampleRate / 60);
+  let bestLag = 0;
+  let bestScore = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let score = 0;
+    for (let i = 0; i < samples.length - lag; i++) {
+      score += samples[i] * samples[i + lag];
+    }
+    if (score > bestScore) { bestScore = score; bestLag = lag; }
+  }
+  return sampleRate / bestLag;
+}
+
+function median(values) {
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+const bottomLineStep = 4 * 7 + 2;
+const pointsOnScreen = 200;
+let history = [];
+
+const variants = [
+  { id: "canvas1", gap: 34, bottomY: 216, background: "neutral", line: "accidental", sign: "before" }
+];
+// один выбранный вариант: средняя высота, нейтральный фон, знак цветом линии, значок вплотную перед нотой
+
+function backgroundColor(accidental) {
+  if (accidental === "♭") return "hsl(205, 70%, 17%)";
+  if (accidental === "♯") return "hsl(340, 60%, 18%)";
+  return "hsl(0, 0%, 13%)";
+}
+
+function lineColor(accidental) {
+  if (accidental === "♭") return "hsl(205, 90%, 68%)";
+  if (accidental === "♯") return "hsl(340, 90%, 72%)";
+  return "#ffffff";
+}
+
+function findRuns() {
+  const runs = [];
+  let current = null;
+  for (let i = 0; i < history.length; i++) {
+    const note = history[i];
+    const same = current && note && note.staffStep === current.note.staffStep && note.accidental === current.note.accidental;
+    if (same) {
+      current.end = i;
+    } else {
+      current = note ? { start: i, end: i, note: note, joinsPrevious: i > 0 && history[i - 1] !== null } : null;
+      if (current) runs.push(current);
+    }
+  }
+  return runs;
+}
+// отрезки одной и той же ноты; joinsPrevious: перед отрезком не было тишины
+
+function drawAccidental(ctx, accidental, rightX, centerY, size, color) {
+  const width = size * 0.42;
+  ctx.strokeStyle = color;
+  ctx.lineCap = "butt";
+  if (accidental === "♯") {
+    const tilt = size * 0.07;
+    ctx.lineWidth = size * 0.06;
+    ctx.beginPath();
+    ctx.moveTo(rightX - width * 0.72, centerY - size * 0.46); ctx.lineTo(rightX - width * 0.72, centerY + size * 0.5);
+    ctx.moveTo(rightX - width * 0.28, centerY - size * 0.5); ctx.lineTo(rightX - width * 0.28, centerY + size * 0.46);
+    ctx.stroke();
+    ctx.lineWidth = size * 0.13;
+    ctx.beginPath();
+    ctx.moveTo(rightX - width, centerY - size * 0.15 + tilt); ctx.lineTo(rightX, centerY - size * 0.15 - tilt);
+    ctx.moveTo(rightX - width, centerY + size * 0.15 + tilt); ctx.lineTo(rightX, centerY + size * 0.15 - tilt);
+    ctx.stroke();
+  } else {
+    const stemX = rightX - width * 0.85;
+    ctx.lineWidth = size * 0.07;
+    ctx.beginPath();
+    ctx.moveTo(stemX, centerY - size * 0.75); ctx.lineTo(stemX, centerY + size * 0.3);
+    ctx.stroke();
+    ctx.lineWidth = size * 0.09;
+    ctx.beginPath();
+    ctx.moveTo(stemX, centerY - size * 0.08);
+    ctx.bezierCurveTo(stemX + width * 0.75, centerY - size * 0.36, stemX + width * 1.25, centerY + size * 0.02, stemX, centerY + size * 0.3);
+    ctx.stroke();
+  }
+  ctx.lineCap = "round";
+}
+// диез и бемоль рисуем сами линиями, а не шрифтом: так их размер и положение одинаковы на любом устройстве
+
+function drawVariant(v) {
+  const canvas = document.getElementById(v.id);
+  canvas.width = canvas.clientWidth;
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const stepX = width / pointsOnScreen;
+  const half = v.gap / 2;
+  const stepToY = (staffStep) => v.bottomY - (staffStep - bottomLineStep) * half;
+  ctx.clearRect(0, 0, width, canvas.height);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  ctx.strokeStyle = "#555555";
+  ctx.lineWidth = 2;
+  for (let line = 0; line < 5; line++) {
+    const y = v.bottomY - line * v.gap;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+  }
+  // пять линеек
+
+  const runs = findRuns();
+  let previousEnd = null;
+  for (let r = 0; r < runs.length; r++) {
+    const run = runs[r];
+    const left = run.start * stepX + (run.joinsPrevious ? 1 : 0);
+    const right = (run.end + 1) * stepX - 1;
+    const centerY = stepToY(run.note.staffStep);
+    const top = centerY - half;
+    const bodyWidth = Math.max(right - left, 3);
+    const accidental = run.note.accidental;
+
+    ctx.strokeStyle = "#555555";
+    ctx.lineWidth = 2;
+    const overhang = v.gap * 0.45;
+    for (let s = bottomLineStep - 2; s >= run.note.staffStep; s -= 2) {
+      ctx.beginPath(); ctx.moveTo(left - overhang, stepToY(s)); ctx.lineTo(right + overhang, stepToY(s)); ctx.stroke();
+    }
+    for (let s = bottomLineStep + 10; s <= run.note.staffStep; s += 2) {
+      ctx.beginPath(); ctx.moveTo(left - overhang, stepToY(s)); ctx.lineTo(right + overhang, stepToY(s)); ctx.stroke();
+    }
+    // добавочные линейки с выносом
+
+    if (v.background !== "none") {
+      ctx.fillStyle = v.background === "accidental" ? backgroundColor(accidental) : backgroundColor("");
+      ctx.beginPath();
+      ctx.roundRect(left, top, bodyWidth, v.gap, Math.min(6, bodyWidth / 2));
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 6]);
+      ctx.beginPath(); ctx.moveTo(left + 4, centerY); ctx.lineTo(right - 4, centerY); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // тёмный фон ноты с чуть скруглёнными углами и пунктиром нуля
+
+    const points = [];
+    for (let i = run.start; i <= run.end; i++) {
+      const y = centerY - (history[i].cents / 50) * half;
+      points.push({ x: i * stepX + stepX / 2, y: Math.max(top + 2, Math.min(top + v.gap - 2, y)) });
+    }
+    ctx.strokeStyle = v.line === "accidental" ? lineColor(accidental) : "#ffffff";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    if (run.joinsPrevious && previousEnd) {
+      ctx.moveTo(previousEnd.x, previousEnd.y);
+      ctx.lineTo(points[0].x, points[0].y);
+    } else {
+      ctx.moveTo(points[0].x, points[0].y);
+    }
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.stroke();
+    previousEnd = points[points.length - 1];
+    // линия отклонения; если тишины не было, соединяем с концом предыдущей ноты
+
+    if (accidental !== "" && !run.joinsPrevious) {
+      const color = v.line === "accidental" ? lineColor(accidental) : "rgba(255, 255, 255, 0.75)";
+      drawAccidental(ctx, accidental, left - 3, centerY, v.gap * 0.8, color);
+    }
+    // значок диеза или бемоля: правый край значка в 3 пикселях от начала ноты
+  }
+}
+
+function drawAll() {
+  variants.forEach(drawVariant);
+}
+
+function addReading(note) {
+  history.push(note);
+  if (history.length > pointsOnScreen) history.shift();
+  drawAll();
+}
+
+function loadTestMelody() {
+  const pitches = [];
+  for (let k = 0; k < 60; k++) {
+    pitches.push(60 - 0.20 * Math.exp(-k / 2) - 0.05 + 0.17 * k / 60 + 0.03 * Math.sin(k * 0.8));
+  }
+  for (let k = 0; k < 8; k++) pitches.push(null);
+  for (let k = 0; k < 30; k++) {
+    pitches.push(64 + (k >= 10 && k < 20 ? 0.30 : 0.02));
+  }
+  for (let k = 0; k < 6; k++) pitches.push(null);
+  for (let k = 0; k < 10; k++) pitches.push(67 + 0.04);
+  for (let k = 0; k < 16; k++) pitches.push(67 + 2 * (k + 1) / 16);
+  for (let k = 0; k < 12; k++) pitches.push(69 - 0.06);
+  for (let k = 0; k < 6; k++) pitches.push(null);
+  for (let k = 0; k < 18; k++) pitches.push(68 - 0.25 + 0.04 * Math.sin(k));
+  for (let k = 0; k < 4; k++) pitches.push(null);
+  for (let k = 0; k < 22; k++) pitches.push(54 + 0.14 - 0.3 * Math.exp(-k / 2));
+  history = pitches.map((pitch) => pitch === null ? null : writtenMidiToNote(pitch));
+  drawAll();
+}
+// тест: длинная нота с заездом и дрейфом; ступенька (трапеция); глиссандо Соль -> Ля через Ля-бемоль; Ля-бемоль ниже на 25; Фа-диез на добавочных
+
+let recent = [];
+document.getElementById("test").addEventListener("click", loadTestMelody);
+
+document.getElementById("start").addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    document.getElementById("status").textContent = "Microphone is on.";
+    history = [];
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 4096;
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+
+    function update() {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        sum += samples[i] * samples[i];
+      }
+      const loudness = Math.sqrt(sum / samples.length);
+      recent.push(loudness > 0.01 ? detectFrequency(samples, audioContext.sampleRate) : null);
+      if (recent.length >= framesPerReading) {
+        const sounding = recent.filter((value) => value !== null);
+        if (sounding.length > framesPerReading / 2) {
+          addReading(writtenMidiToNote(frequencyToWrittenMidi(median(sounding))));
+        } else {
+          addReading(null);
+        }
+        recent = [];
+      }
+      requestAnimationFrame(update);
+    }
+    update();
+  } catch (error) {
+    document.getElementById("status").textContent = "Error: " + error.name;
+  }
+});
+
+window.addEventListener("resize", drawAll);
+loadTestMelody();
+</script>
+</body>
+</html>
