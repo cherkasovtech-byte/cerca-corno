@@ -194,13 +194,13 @@ const half = gap / 2;
 const bottomY = 212;
 const middleY = bottomY - 2 * gap;
 const bottomLineStep = 4 * 7 + 2;
-const stepX = 4 / 3;
+const stepX = 1;
 const pauseSteps = Math.round(2.5 * gap / stepX);
 const signRoomSteps = Math.round(15 / stepX);
 const zoomHalf = 2 * gap;
 const stepToY = (staffStep) => bottomY - (staffStep - bottomLineStep) * half;
 // всё по вертикали на 15% меньше прежнего; шкала справа ровно от верхней до нижней линейки
-// лента пишет каждый кадр, 4/3 px на кадр (80 px в секунду); пауза растёт до 2.5 расстояния между линейками;
+// лента пишет каждый кадр, ровно 1 px на кадр (60 px в секунду): при целом шаге линии не дрожат при прокрутке; пауза растёт до 2.5 расстояния между линейками;
 // если перед нотой тишина хотя бы 15 px, знак встаёт в неё, иначе внутрь начала ноты
 
 let history = [];
@@ -220,6 +220,7 @@ function trimPause() {
 
 function addFrame(note) {
   if (note === null) {
+    for (let k = 0; k < pending.length; k++) history[history.length - 1 - k] = { type: "silent" };
     soundOn = false;
     pending = [];
     if (history.length > 0) history.push({ type: "silent" });
@@ -228,20 +229,17 @@ function addFrame(note) {
     history.push({ type: "note", note: note });
   } else {
     pending.push(note);
-    history.push({ type: "silent" });
+    history.push({ type: "pending", note: note });
     if (pending.length >= minNoteFrames) {
-      for (let k = 0; k < pending.length; k++) {
-        history[history.length - pending.length + k] = { type: "note", note: pending[k] };
-      }
+      for (let k = 0; k < pending.length; k++) history[history.length - 1 - k].type = "note";
       soundOn = true;
       pending = [];
     }
   }
   if (history.length > 4000) history.shift();
 }
-// новый звук сначала пишется на ленту пустотой; продержался 12 кадров без перерыва — пустота задним числом
-// превращается в ноты; не продержался — остаётся пустотой. Проверяем непрерывность звука, а не одну и ту же ноту:
-// так проходят глиссандо и вибрато, а короткие обрывки и шум — нет
+// новый звук сразу рисуется бледно ("pending"); продержался 12 кадров без перерыва — становится обычной нотой,
+// оборвался раньше — бледные кадры превращаются в тишину. Так нота не выскакивает на ленту рывком
 
 function findRuns(headX) {
   const firstIndex = Math.max(0, history.length - Math.ceil(headX / stepX) - 1);
@@ -261,6 +259,7 @@ function findRuns(headX) {
       current = {
         left: right - stepX, right: right,
         staffStep: note.staffStep, accidental: note.accidental,
+        pending: item.type === "pending",
         afterSilence: i === firstIndex || history[i - 1].type === "silent",
         signRoom: i === firstIndex || silentBefore >= signRoomSteps,
         points: [{ x: right - stepX / 2, cents: note.cents }]
@@ -308,6 +307,7 @@ function drawRuns(ctx, runs, headX, scheme) {
   const signSize = gap * 0.8;
   const signSpace = Math.round(signSize * 0.42) + 6;
   for (const run of runs) {
+    ctx.globalAlpha = run.pending ? 0.35 : 1;
     const left = run.left + (run.afterSilence ? 0 : 1);
     const right = run.right - 1;
     const signInside = run.accidental !== "" && !run.signRoom;
@@ -438,7 +438,8 @@ function drawNoteName(ctx, centerX, centerY, size, outline) {
   const inkWidth = box.actualBoundingBoxLeft + box.actualBoundingBoxRight;
   const capHeight = box.actualBoundingBoxAscent;
   const inkLeft = centerX - inkWidth / 2;
-  const baseline = centerY + capHeight / 2;
+  const xHeight = ctx.measureText("x").actualBoundingBoxAscent;
+  const baseline = centerY + xHeight / 2;
   const x = inkLeft + box.actualBoundingBoxLeft;
   const stem = size * 0.085;
   const outlineWidth = size * 0.06;
@@ -447,7 +448,8 @@ function drawNoteName(ctx, centerX, centerY, size, outline) {
   const signCenterX = centerX - widestHalf - size * 0.3;
   const octaveCenterX = centerX + widestHalf + size * 0.36;
   // места знака и октавы постоянные: сразу за краями самого длинного названия (Sol), поэтому не пляшут
-  // меряем сами буквы (а не клетку шрифта) и ставим их середину ровно в centerX, centerY; stem — толщина штриха букв
+  // меряем сами буквы (а не клетку шрифта): по ширине середина в centerX, по высоте в centerY — середина строчных букв
+  // (слово читается по строчным), заглавные выступают вверх; stem — толщина штриха букв
 
   if (note.accidental !== "") {
     const signRight = signCenterX + capHeight * 0.25;
@@ -597,9 +599,9 @@ function drawLayout(layout, scheme) {
 
   const textWidth = layout.text === "side" ? 140 : 0;
   const scaleWidth = layout.scale === "narrow" ? Math.max(90, Math.min(120, width * 0.1)) : Math.max(200, Math.min(260, width * 0.22));
-  const zoomX = width - textWidth - scaleWidth;
+  const zoomX = Math.round(width - textWidth - scaleWidth);
   const scaleRight = zoomX + scaleWidth;
-  const headX = zoomX - Math.max(40, width * 0.06);
+  const headX = Math.round(zoomX - Math.max(40, width * 0.06));
   // справа налево: колонка с нотой (только вариант 1), шкала, воронка, лента
 
   ctx.strokeStyle = "#555555";
@@ -614,6 +616,7 @@ function drawLayout(layout, scheme) {
   // пять линеек до головки и тонкая вертикаль самой головки, только в пределах нотоносца
 
   drawRuns(ctx, findRuns(headX), headX, scheme);
+  ctx.globalAlpha = 1;
   drawMagnifier(ctx, headX, zoomX, scaleRight, scheme, layout.text === "inside");
 
   const controls = document.getElementById(layout.controls);
