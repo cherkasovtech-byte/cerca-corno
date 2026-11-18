@@ -22,7 +22,7 @@
   .seg { display: flex; }
   .seg button { flex: 1; padding: 4px 0; }
   .seg button + button { border-left: none; }
-  .seg button.on { background: var(--white); color: var(--black); }
+  .seg button.on, button.on { background: var(--white); color: var(--black); }
 </style>
 </head>
 <body>
@@ -255,13 +255,18 @@ const stepToY = (staffStep) => bottomY - (staffStep - bottomLineStep) * half;
 
 const centsFrom = (midi, base) => Math.round(100 * (midi - base));
 
+let stopOnSilence = true;
+try { stopOnSilence = localStorage.getItem("stopOnSilence") !== "off"; } catch (error) {}
+// останавливать ли ленты в тишине (тумблер под шкалой); выбор запоминается
+
 function trimPause() {
+  if (!stopOnSilence) return;
   const history = track.history;
   let silent = 0;
   for (let i = history.length - 1; i >= 0 && history[i].type === "silent"; i--) silent++;
   while (silent > pauseSteps) { history.pop(); silent--; }
 }
-// хвост тишины не длиннее паузы: дальше лента стоит
+// хвост тишины не длиннее паузы: дальше лента стоит (если тумблер включён)
 
 function pushSilent() {
   if (track.history.length > 0) track.history.push({ type: "silent" });
@@ -280,7 +285,6 @@ function retag(count, base, values) {
 
 function addFrame(midi) {
   const history = track.history;
-  if (history.length > 4000) history.shift();
   if (track.current === null) {
     if (midi === null) {
       for (let k = 0; k < track.pendingMidi.length; k++) history[history.length - 1 - k] = { type: "silent" };
@@ -1001,16 +1005,21 @@ function processTrack(name, loudness) {
   }
   // громко и чисто — частота; иначе — тишина
 
-  track.raw.push(frequency === null ? null : frequencyToWrittenMidi(frequency));
-  if (track.raw.length > 2000) track.raw.shift();
-  // сырая высота каждого кадра, без сглаживания и без трекера — для графика частоты
-
   track.frames.push(frequency);
   if (track.frames.length > smoothingFrames) track.frames.shift();
   const sounding = track.frames.filter((value) => value !== null);
   track.smoothed = sounding.length > smoothingFrames / 2 ? median(sounding) : null;
+  if (track.history.length > 4000) track.history.shift();
+  const lengthBefore = track.history.length;
   addFrame(track.smoothed === null ? null : frequencyToWrittenMidi(track.smoothed));
   // скользящая медиана последних 7 кадров -> трекер нот
+
+  if (track.history.length > lengthBefore) {
+    track.raw.push(frequency === null ? null : frequencyToWrittenMidi(frequency));
+    if (track.raw.length > 4000) track.raw.shift();
+  }
+  // сырая высота кадра — для графика частоты; пишем, только если лента нотоносца в этот кадр сдвинулась:
+  // так оба графика едут вместе, с одинаковым зазором, и вместе останавливаются в тишине
 
   if (track.current === null) {
     track.shownCents = null;
@@ -1050,6 +1059,7 @@ document.getElementById("controlsB").innerHTML =
   '<div class="seg" id="pitch"><button data-value="440">440</button><button data-value="442">442</button></div>' +
   '</div>' +
   '<div class="row"><button class="start">Microphone</button><button class="test">Test</button></div>' +
+  '<button id="hold">Stop in silence</button>' +
   '<p class="status">Microphone is off.</p>' +
   '<p class="status debug"></p>';
 document.querySelector(".start").addEventListener("click", startMicrophone);
@@ -1059,6 +1069,7 @@ document.querySelector(".test").addEventListener("click", playTestMelody);
 function markSwitches() {
   document.querySelectorAll("#instrument button").forEach((b) => b.classList.toggle("on", Number(b.dataset.value) === transposition));
   document.querySelectorAll("#pitch button").forEach((b) => b.classList.toggle("on", Number(b.dataset.value) === referenceA));
+  document.getElementById("hold").classList.toggle("on", stopOnSilence);
 }
 document.querySelectorAll("#instrument button").forEach((b) => b.addEventListener("click", () => {
   transposition = Number(b.dataset.value);
@@ -1070,7 +1081,13 @@ document.querySelectorAll("#pitch button").forEach((b) => b.addEventListener("cl
   try { localStorage.setItem("referenceA", referenceA); } catch (error) {}
   resetTracks(); markSwitches(); drawAll();
 }));
+document.getElementById("hold").addEventListener("click", () => {
+  stopOnSilence = !stopOnSilence;
+  try { localStorage.setItem("stopOnSilence", stopOnSilence ? "on" : "off"); } catch (error) {}
+  markSwitches();
+});
 markSwitches();
+// тумблер «Stop in silence»: белый — ленты стоят в тишине, чёрный — едут всегда
 // переключатели: выбранный белый; при смене строя лента начинается заново, иначе старые ноты стояли бы не там
 
 const strip = document.getElementById("layoutB");
