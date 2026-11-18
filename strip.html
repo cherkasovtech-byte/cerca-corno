@@ -10,21 +10,24 @@
   h1 { font-size: 16px; font-weight: normal; margin: 0 0 4px; text-align: center; }
   h2 { font-size: 13px; font-weight: normal; color: var(--grey); margin: 18px 0 0; }
   .strip { position: relative; }
-  canvas { display: block; width: 100%; height: 374px; }
+  canvas { display: block; width: 100%; height: 400px; touch-action: pan-y; }
   .controls { position: absolute; display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
   .meter { height: 4px; background: var(--dark); border-radius: 2px; }
   .fill { height: 100%; width: 0%; border-radius: 2px; background: var(--white); }
   button { background: transparent; color: var(--white); border: 1px solid var(--white); font: inherit; font-size: 12px; padding: 4px 6px; white-space: nowrap; cursor: pointer; }
   button:hover { background: var(--white); color: var(--black); }
   .status { color: var(--grey); font-size: 11px; margin: 0; text-align: center; }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+  .seg { display: flex; }
+  .seg button { flex: 1; padding: 4px 0; }
+  .seg button + button { border-left: none; }
+  .seg button.on { background: var(--white); color: var(--black); }
 </style>
 </head>
 <body>
 <h1>Chi cerca il corno</h1>
 
-<h2>A · autocorrelation (as in the pen)</h2>
-<div class="strip"><canvas id="layoutA"></canvas><div class="controls" id="controlsA"></div></div>
-<h2>B · YIN</h2>
 <div class="strip"><canvas id="layoutB"></canvas><div class="controls" id="controlsB"></div></div>
 
 
@@ -32,8 +35,15 @@
 const noteLetters = ["Do", "Do", "Re", "Mi", "Mi", "Fa", "Fa", "Sol", "La", "La", "Si", "Si"];
 const noteAccidentals = ["", "♯", "", "♭", "", "", "♯", "", "♭", "", "♭", ""];
 const letterSteps = [0, 0, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6];
-const referenceA = 442;
-const transposition = 7;
+let referenceA = 442;
+let transposition = 7;
+try {
+  referenceA = Number(localStorage.getItem("referenceA")) || 442;
+  const saved = localStorage.getItem("transposition");
+  if (saved !== null) transposition = Number(saved);
+} catch (error) {}
+// строй оркестра (440 или 442) и строй инструмента (C = 0, B♭ = +2, F = +7 полутонов к написанной ноте);
+// выбор запоминается в браузере
 const inTuneCents = 10;
 const minLoudness = 0.004;
 const minClarity = 0.7;
@@ -69,33 +79,13 @@ function writtenMidiToFrequency(writtenMidi) {
 }
 // обратно: написанная нота валторны -> реальная частота (нужно тестовой мелодии)
 
-function detectFrequency(samples, sampleRate) {
-  const minLag = Math.floor(sampleRate / 1000);
-  const maxLag = Math.floor(sampleRate / 60);
-  let bestLag = 0;
-  let bestScore = 0;
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let score = 0;
-    for (let i = 0; i < samples.length - lag; i++) {
-      score += samples[i] * samples[i + lag];
-    }
-    if (score > bestScore) { bestScore = score; bestLag = lag; }
-  }
-  if (bestLag === 0) return { frequency: 0, clarity: 0 };
-  let energy = 0;
-  for (let i = 0; i < samples.length - bestLag; i++) {
-    energy += samples[i] * samples[i] + samples[i + bestLag] * samples[i + bestLag];
-  }
-  return { frequency: sampleRate / bestLag, clarity: 2 * bestScore / energy };
-}
-// чистота: 1 — волна через найденный сдвиг повторяется точно (нота), ближе к 0 — не повторяется (шум)
 
 const yinThreshold = 0.15;
 let yinBuffer = null;
 
 function detectFrequencyYin(samples, sampleRate) {
   const size = samples.length / 2;
-  const minLag = Math.floor(sampleRate / 1000);
+  const minLag = Math.floor(sampleRate / 2000);
   const maxLag = Math.min(Math.floor(sampleRate / 60), size - 1);
   if (yinBuffer === null || yinBuffer.length !== maxLag + 2) yinBuffer = new Float32Array(maxLag + 2);
   const d = yinBuffer;
@@ -227,11 +217,11 @@ function splitAtZones(points) {
 // чтобы каждый кусок линии красился по своей зоне
 
 function createTrack(detect) {
-  return { detect: detect, history: [], frames: [], current: null, lastCents: 0, pendingMidi: [], candidate: [], gap: 0,
+  return { detect: detect, history: [], raw: [], graphCenter: null, frames: [], current: null, lastCents: 0, pendingMidi: [], candidate: [], gap: 0,
            shownCents: null, shownHertz: null, shownNote: null, smoothed: null, clarity: null };
 }
-const tracks = { A: createTrack(detectFrequency), B: createTrack(detectFrequencyYin) };
-let track = tracks.A;
+const tracks = { B: createTrack(detectFrequencyYin) };
+let track = tracks.B;
 // у каждого варианта своя лента и своё состояние; track — тот, с которым сейчас работают функции ниже
 
 function setStatus(text) {
@@ -246,11 +236,11 @@ function currentNote() {
 }
 // нота, которая звучит прямо сейчас (или null), с последним отклонением
 
-const canvasHeight = 374;
+let canvasHeight = 400;
 const gap = 29;
 const half = gap / 2;
-const bottomY = 212;
-const middleY = bottomY - 2 * gap;
+let bottomY = 212;
+let middleY = bottomY - 2 * gap;
 const bottomLineStep = 4 * 7 + 2;
 const stepX = 1;
 const pauseSteps = Math.round(2.5 * gap / stepX);
@@ -624,7 +614,7 @@ function drawHertz(ctx, centerX, centerY, size) {
   ctx.fillText(track.shownHertz.toFixed(1) + " Hz", centerX, centerY);
 }
 
-function drawMagnifier(ctx, headX, zoomX, zoneRight, scheme, textInside) {
+function drawMagnifier(ctx, source, zoomX, zoneRight, scheme, textInside) {
   const current = currentNote();
   const top = middleY - zoomHalf;
   const height = 2 * zoomHalf;
@@ -632,26 +622,24 @@ function drawMagnifier(ctx, headX, zoomX, zoneRight, scheme, textInside) {
   const labelWidth = 30;
   const centsToY = (c) => middleY - centsToUnit(c) * zoomHalf;
 
-  if (current) {
-    const centerY = stepToY(current.staffStep);
-    const headY = Math.max(centerY - half + 2, Math.min(centerY + half - 2, centerY - centsToUnit(current.cents) * half));
+  if (current && source) {
     ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
     ctx.beginPath();
-    ctx.moveTo(headX, centerY - half); ctx.lineTo(zoomX, top); ctx.lineTo(zoomX, top + height); ctx.lineTo(headX, centerY + half);
+    ctx.moveTo(source.x, source.top); ctx.lineTo(zoomX, top); ctx.lineTo(zoomX, top + height); ctx.lineTo(source.x, source.bottom);
     ctx.closePath(); ctx.fill();
     ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(headX, centerY - half); ctx.lineTo(zoomX, top);
-    ctx.moveTo(headX, centerY + half); ctx.lineTo(zoomX, top + height);
+    ctx.moveTo(source.x, source.top); ctx.lineTo(zoomX, top);
+    ctx.moveTo(source.x, source.bottom); ctx.lineTo(zoomX, top + height);
     ctx.stroke();
     ctx.strokeStyle = levelColor(current.cents, scheme);
     ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(headX, headY); ctx.lineTo(zoomX, centsToY(current.cents)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(source.x, source.y); ctx.lineTo(zoomX, centsToY(current.cents)); ctx.stroke();
     ctx.fillStyle = zoneColor(current.cents, scheme);
-    ctx.beginPath(); ctx.arc(headX, headY, 4, 0, 2 * Math.PI); ctx.fill();
+    ctx.beginPath(); ctx.arc(source.x, source.y, 4, 0, 2 * Math.PI); ctx.fill();
   }
-  // воронка от краёв текущей ноты к лупе и тяга от пишущей точки к метке
+  // воронка от полосы текущей ноты на правом краю графика к лупе и тяга от точки высоты к метке
 
   ctx.save();
   ctx.beginPath(); ctx.roundRect(zoomX, top, width, height, 6); ctx.clip();
@@ -701,14 +689,85 @@ function drawMagnifier(ctx, headX, zoomX, zoneRight, scheme, textInside) {
 }
 
 const layouts = [
-  { canvas: "layoutA", controls: "controlsA", scale: "wide", text: "inside", track: "A" },
   { canvas: "layoutB", controls: "controlsB", scale: "wide", text: "inside", track: "B" }
 ];
-// две одинаковые полосы: A — автокорреляция, как в пене; B — YIN
+// одна полоса на YIN
+
+let graphShare = 0.28;
+try { graphShare = Number(localStorage.getItem("graphShare")) || 0.28; } catch (error) {}
+let dividerX = 0;
+// доля ширины под график частоты; dividerX — где сейчас его левая граница (её можно таскать)
+
+const blackKeys = [1, 3, 6, 8, 10];
+
+function drawGraph(ctx, left, right, top, bottom) {
+  const width = right - left;
+  const height = bottom - top;
+  const current = currentNote();
+  const target = current ? track.current + current.cents / 100 : null;
+  if (track.graphCenter === null) track.graphCenter = target === null ? 67 : target;
+  else if (target !== null) track.graphCenter += (target - track.graphCenter) * 0.08;
+  const center = track.graphCenter;
+  const middle = (top + bottom) / 2;
+  const yOf = (midi) => middle - (midi - center) * gap;
+  // по вертикали: одна полоса = один полутон высотой как нота на нотоносце; середина плавно едет за текущей нотой
+
+  ctx.save();
+  ctx.beginPath(); ctx.roundRect(left, top, width, height, 6); ctx.clip();
+  const lowest = Math.floor(center - height / gap / 2) - 1;
+  const highest = Math.ceil(center + height / gap / 2) + 1;
+  for (let midi = lowest; midi <= highest; midi++) {
+    const black = blackKeys.includes(((midi % 12) + 12) % 12);
+    ctx.fillStyle = black ? "hsl(0, 0%, 7%)" : "hsl(0, 0%, 17%)";
+    ctx.fillRect(left, yOf(midi + 0.5), width, gap);
+    ctx.strokeStyle = "hsl(0, 0%, 32%)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(left, Math.round(yOf(midi + 0.5)) + 0.5); ctx.lineTo(right, Math.round(yOf(midi + 0.5)) + 0.5); ctx.stroke();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+    ctx.setLineDash([3, 5]);
+    ctx.beginPath(); ctx.moveTo(left, yOf(midi)); ctx.lineTo(right, yOf(midi)); ctx.stroke();
+    ctx.setLineDash([]);
+    const note = writtenMidiToNote(midi);
+    ctx.fillStyle = black ? "#666666" : "#8a8a8a";
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(note.letter + note.accidental + (note.letter === "Do" && note.accidental === "" ? " " + displayOctave(note) : ""), left + 5, yOf(midi));
+  }
+  // фон как клавиатура: белые клавиши светлее, чёрные темнее, между полутонами линия, середина полутона — пунктир;
+  // слева подписи нот, у до ещё номер октавы
+
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  let drawing = false;
+  for (let k = 0; k < track.raw.length; k++) {
+    const x = right - (track.raw.length - 1 - k) - 0.5;
+    if (x < left) continue;
+    const midi = track.raw[k];
+    if (midi === null) { drawing = false; continue; }
+    if (!drawing) { ctx.moveTo(x, yOf(midi)); drawing = true; } else ctx.lineTo(x, yOf(midi));
+  }
+  ctx.stroke();
+  ctx.restore();
+  // сырая высота каждого кадра справа налево, 1 px на кадр, как лента; где детектор молчит — разрыв
+
+  if (!current) return null;
+  return { x: right, top: yOf(track.current + 0.5), bottom: yOf(track.current - 0.5), y: yOf(target) };
+  // откуда начинается воронка: полоса текущей ноты на правом краю графика
+}
 
 function drawLayout(layout, scheme) {
   track = tracks[layout.track];
   const canvas = document.getElementById(layout.canvas);
+  const controls = document.getElementById(layout.controls);
+  const reach = 14 + controls.offsetHeight;
+  canvasHeight = Math.round(4 * gap + 2 * reach + 16);
+  middleY = canvasHeight / 2;
+  bottomY = middleY + 2 * gap;
+  if (canvas.style.height !== canvasHeight + "px") canvas.style.height = canvasHeight + "px";
+  // высота полосы: шкала (от верхней до нижней линейки) плюс столько же сверху, сколько кнопки занимают снизу
+
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth;
   canvas.width = Math.round(width * ratio);
@@ -720,31 +779,35 @@ function drawLayout(layout, scheme) {
   ctx.lineJoin = "round";
   // чёткость на ретине: рисуем в реальных пикселях экрана
 
-  const textWidth = layout.text === "side" ? 140 : 0;
-  const scaleWidth = layout.scale === "narrow" ? Math.max(90, Math.min(120, width * 0.1)) : Math.max(200, Math.min(260, width * 0.22));
-  const zoomX = Math.round(width - textWidth - scaleWidth);
-  const scaleRight = zoomX + scaleWidth;
-  const headX = Math.round(zoomX - Math.max(40, width * 0.06));
-  // справа налево: колонка с нотой (только вариант 1), шкала, воронка, лента
+  const scaleWidth = Math.max(200, Math.min(260, width * 0.22));
+  const zoomX = Math.round(width - scaleWidth);
+  const graphRight = Math.round(zoomX - Math.max(40, width * 0.06));
+  const graphWidth = Math.max(80, Math.min(graphRight - 150, Math.round(width * graphShare)));
+  const headX = graphRight - graphWidth;
+  dividerX = headX;
+  // справа налево: шкала, воронка, график частоты, лента нотоносца
 
   ctx.strokeStyle = "#555555";
   ctx.lineWidth = 2;
   for (let line = 0; line < 5; line++) {
     const y = bottomY - line * gap;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(headX, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(headX - 8, y); ctx.stroke();
   }
-  ctx.strokeStyle = "#333333";
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(headX + 0.5, bottomY - 4 * gap); ctx.lineTo(headX + 0.5, bottomY); ctx.stroke();
-  // пять линеек до головки и тонкая вертикаль самой головки, только в пределах нотоносца
-
-  drawRuns(ctx, findRuns(headX), headX, scheme);
+  drawRuns(ctx, findRuns(headX - 8), headX - 8, scheme);
   ctx.globalAlpha = 1;
-  drawMagnifier(ctx, headX, zoomX, scaleRight, scheme, layout.text === "inside");
+  // лента нотоносца до графика
 
-  const controls = document.getElementById(layout.controls);
+  const graphTop = middleY - 2 * gap - reach;
+  const graphBottom = middleY + 2 * gap + reach;
+  const source = drawGraph(ctx, headX, graphRight, graphTop, graphBottom);
+  ctx.fillStyle = "#777777";
+  ctx.beginPath(); ctx.roundRect(headX - 5, middleY - 16, 4, 32, 2); ctx.fill();
+  // график частоты и ручка на его левой границе
+
+  drawMagnifier(ctx, source, zoomX, width, scheme, layout.text === "inside");
+
   controls.style.left = zoomX + "px";
-  controls.style.width = (scaleWidth + textWidth) + "px";
+  controls.style.width = scaleWidth + "px";
   controls.style.top = (bottomY + 14) + "px";
   // кнопки под шкалой
 }
@@ -850,7 +913,6 @@ function setupAudio() {
 // один анализатор на всё: в него идёт либо микрофон, либо тестовая мелодия
 
 function resetTracks() {
-  tracks.A = createTrack(detectFrequency);
   tracks.B = createTrack(detectFrequencyYin);
 }
 
@@ -932,6 +994,10 @@ function processTrack(name, loudness) {
   }
   // громко и чисто — частота; иначе — тишина
 
+  track.raw.push(frequency === null ? null : frequencyToWrittenMidi(frequency));
+  if (track.raw.length > 2000) track.raw.shift();
+  // сырая высота каждого кадра, без сглаживания и без трекера — для графика частоты
+
   track.frames.push(frequency);
   if (track.frames.length > smoothingFrames) track.frames.shift();
   const sounding = track.frames.filter((value) => value !== null);
@@ -963,25 +1029,68 @@ function update() {
   const loudness = Math.sqrt(sum / samples.length);
   document.querySelectorAll(".fill").forEach((fill) => { fill.style.width = Math.min(100, loudness * 500) + "%"; });
   frameCount++;
-  processTrack("A", loudness);
   processTrack("B", loudness);
   drawAll();
-  // один и тот же звук каждый кадр идёт в оба детектора; имя ноты, лента и лупа — каждый кадр
+  // каждый кадр: YIN -> трекер нот -> рисуем ленту, график частоты и лупу
 
   requestAnimationFrame(update);
 }
 
-for (const n of ["A", "B"]) {
-  document.getElementById("controls" + n).innerHTML =
-    '<div class="meter"><div class="fill"></div></div>' +
-    '<button class="start">Microphone</button>' +
-    '<button class="test">Test melody</button>' +
-    '<p class="status">Microphone is off.</p>' +
-    '<p class="status debug"></p>';
+document.getElementById("controlsB").innerHTML =
+  '<div class="meter"><div class="fill"></div></div>' +
+  '<div class="row">' +
+  '<div class="seg" id="instrument"><button data-value="0">C</button><button data-value="2">B♭</button><button data-value="7">F</button></div>' +
+  '<div class="seg" id="pitch"><button data-value="440">440</button><button data-value="442">442</button></div>' +
+  '</div>' +
+  '<div class="row"><button class="start">Microphone</button><button class="test">Test</button></div>' +
+  '<p class="status">Microphone is off.</p>' +
+  '<p class="status debug"></p>';
+document.querySelector(".start").addEventListener("click", startMicrophone);
+document.querySelector(".test").addEventListener("click", playTestMelody);
+// под шкалой: громкость, строй инструмента и строй ля, кнопки, строки состояния
+
+function markSwitches() {
+  document.querySelectorAll("#instrument button").forEach((b) => b.classList.toggle("on", Number(b.dataset.value) === transposition));
+  document.querySelectorAll("#pitch button").forEach((b) => b.classList.toggle("on", Number(b.dataset.value) === referenceA));
 }
-document.querySelectorAll(".start").forEach((button) => button.addEventListener("click", startMicrophone));
-document.querySelectorAll(".test").forEach((button) => button.addEventListener("click", playTestMelody));
-// у каждого варианта свои кнопки, но работают они на один общий тюнер
+document.querySelectorAll("#instrument button").forEach((b) => b.addEventListener("click", () => {
+  transposition = Number(b.dataset.value);
+  try { localStorage.setItem("transposition", transposition); } catch (error) {}
+  resetTracks(); markSwitches(); drawAll();
+}));
+document.querySelectorAll("#pitch button").forEach((b) => b.addEventListener("click", () => {
+  referenceA = Number(b.dataset.value);
+  try { localStorage.setItem("referenceA", referenceA); } catch (error) {}
+  resetTracks(); markSwitches(); drawAll();
+}));
+markSwitches();
+// переключатели: выбранный белый; при смене строя лента начинается заново, иначе старые ноты стояли бы не там
+
+const strip = document.getElementById("layoutB");
+let dragging = false;
+strip.addEventListener("pointerdown", (event) => {
+  const x = event.clientX - strip.getBoundingClientRect().left;
+  if (Math.abs(x - dividerX) < 14) {
+    dragging = true;
+    strip.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+});
+strip.addEventListener("pointermove", (event) => {
+  const x = event.clientX - strip.getBoundingClientRect().left;
+  strip.style.cursor = dragging || Math.abs(x - dividerX) < 14 ? "ew-resize" : "default";
+  if (!dragging) return;
+  const width = strip.clientWidth;
+  const graphRight = Math.round(width - Math.max(200, Math.min(260, width * 0.22)) - Math.max(40, width * 0.06));
+  graphShare = Math.max(80, Math.min(graphRight - 150, graphRight - x)) / width;
+  drawAll();
+});
+strip.addEventListener("pointerup", () => {
+  if (!dragging) return;
+  dragging = false;
+  try { localStorage.setItem("graphShare", graphShare); } catch (error) {}
+});
+// левую границу графика можно таскать мышкой или пальцем; ширина запоминается
 
 window.addEventListener("resize", drawAll);
 drawAll();
