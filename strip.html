@@ -217,7 +217,7 @@ function splitAtZones(points) {
 // чтобы каждый кусок линии красился по своей зоне
 
 function createTrack(detect) {
-  return { detect: detect, history: [], raw: [], graphCenter: null, frames: [], current: null, lastCents: 0, pendingMidi: [], candidate: [], gap: 0,
+  return { detect: detect, history: [], raw: [], frames: [], current: null, lastCents: 0, pendingMidi: [], candidate: [], gap: 0,
            shownCents: null, shownHertz: null, shownNote: null, smoothed: null, clarity: null };
 }
 const tracks = { B: createTrack(detectFrequencyYin) };
@@ -700,61 +700,54 @@ let dividerX = 0;
 
 const blackKeys = [1, 3, 6, 8, 10];
 
+const graphLow = 50;
+const graphHigh = 91;
+// диапазон графика (написанные ноты): от Re малой октавы (4 добавочные под нотоносцем) до Sol третьей (4 добавочные над ним)
+
 function drawGraph(ctx, left, right, top, bottom) {
   const width = right - left;
   const height = bottom - top;
-  const current = currentNote();
-  const target = current ? track.current + current.cents / 100 : null;
-  if (track.graphCenter === null) track.graphCenter = target === null ? 67 : target;
-  else if (target !== null) track.graphCenter += (target - track.graphCenter) * 0.08;
-  const center = track.graphCenter;
-  const middle = (top + bottom) / 2;
-  const yOf = (midi) => middle - (midi - center) * gap;
-  // по вертикали: одна полоса = один полутон высотой как нота на нотоносце; середина плавно едет за текущей нотой
+  const key = height / (graphHigh - graphLow + 1);
+  const yOf = (midi) => bottom - (midi - graphLow + 0.5) * key;
+  // по вертикали всё неподвижно: весь диапазон вписан в высоту графика, key — высота одного полутона
 
   ctx.save();
   ctx.beginPath(); ctx.roundRect(left, top, width, height, 6); ctx.clip();
-  const lowest = Math.floor(center - height / gap / 2) - 1;
-  const highest = Math.ceil(center + height / gap / 2) + 1;
-  for (let midi = lowest; midi <= highest; midi++) {
-    const black = blackKeys.includes(((midi % 12) + 12) % 12);
+  for (let midi = graphLow; midi <= graphHigh; midi++) {
+    const black = blackKeys.includes(midi % 12);
     ctx.fillStyle = black ? "hsl(0, 0%, 7%)" : "hsl(0, 0%, 17%)";
-    ctx.fillRect(left, yOf(midi + 0.5), width, gap);
-    ctx.strokeStyle = "hsl(0, 0%, 32%)";
+    ctx.fillRect(left, yOf(midi + 0.5), width, key);
+    const edge = Math.round(yOf(midi + 0.5)) + 0.5;
+    ctx.strokeStyle = midi % 12 === 11 ? "hsl(0, 0%, 45%)" : "hsl(0, 0%, 28%)";
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(left, Math.round(yOf(midi + 0.5)) + 0.5); ctx.lineTo(right, Math.round(yOf(midi + 0.5)) + 0.5); ctx.stroke();
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
-    ctx.setLineDash([3, 5]);
-    ctx.beginPath(); ctx.moveTo(left, yOf(midi)); ctx.lineTo(right, yOf(midi)); ctx.stroke();
-    ctx.setLineDash([]);
-    const note = writtenMidiToNote(midi);
-    ctx.fillStyle = black ? "#666666" : "#8a8a8a";
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillText(note.letter + note.accidental + (note.letter === "Do" && note.accidental === "" ? " " + displayOctave(note) : ""), left + 5, yOf(midi));
+    ctx.beginPath(); ctx.moveTo(left, edge); ctx.lineTo(right, edge); ctx.stroke();
+    if (midi % 12 === 0) {
+      ctx.fillStyle = "#8a8a8a";
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText("Do " + displayOctave(writtenMidiToNote(midi)), left + 5, yOf(midi));
+    }
   }
-  // фон как клавиатура: белые клавиши светлее, чёрные темнее, между полутонами линия, середина полутона — пунктир;
-  // слева подписи нот, у до ещё номер октавы
+  // фон как клавиатура: белые клавиши светлее, чёрные темнее, линии между полутонами;
+  // граница между си и до ярче, у до подписан номер октавы
 
   ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  let drawing = false;
+  let previous = null;
   for (let k = 0; k < track.raw.length; k++) {
     const x = right - (track.raw.length - 1 - k) - 0.5;
-    if (x < left) continue;
     const midi = track.raw[k];
-    if (midi === null) { drawing = false; continue; }
-    if (!drawing) { ctx.moveTo(x, yOf(midi)); drawing = true; } else ctx.lineTo(x, yOf(midi));
+    if (x < left || midi === null || midi < graphLow - 0.5 || midi > graphHigh + 0.5) { previous = null; continue; }
+    if (previous === null || Math.abs(midi - previous) > 0.3) ctx.moveTo(x - 0.5, yOf(midi));
+    ctx.lineTo(x + 0.5, yOf(midi));
+    previous = midi;
   }
   ctx.stroke();
   ctx.restore();
-  // сырая высота каждого кадра справа налево, 1 px на кадр, как лента; где детектор молчит — разрыв
-
-  if (!current) return null;
-  return { x: right, top: yOf(track.current + 0.5), bottom: yOf(track.current - 0.5), y: yOf(target) };
-  // откуда начинается воронка: полоса текущей ноты на правом краю графика
+  // сырая высота каждого кадра, 1 px на кадр, новое у правого края; соседние кадры соединяем, только если
+  // высота сдвинулась меньше чем на 0.3 полутона: скачки между нотами (и легато тоже) — без вертикальных палок
 }
 
 function drawLayout(layout, scheme) {
@@ -781,30 +774,44 @@ function drawLayout(layout, scheme) {
 
   const scaleWidth = Math.max(200, Math.min(260, width * 0.22));
   const zoomX = Math.round(width - scaleWidth);
-  const graphRight = Math.round(zoomX - Math.max(40, width * 0.06));
-  const graphWidth = Math.max(80, Math.min(graphRight - 150, Math.round(width * graphShare)));
-  const headX = graphRight - graphWidth;
-  dividerX = headX;
-  // справа налево: шкала, воронка, график частоты, лента нотоносца
+  const headX = Math.round(zoomX - Math.max(40, width * 0.06));
+  const graphRight = Math.max(80, Math.min(headX - 150, Math.round(width * graphShare)));
+  dividerX = graphRight;
+  const staffLeft = graphRight + 12;
+  // слева направо: график частоты, лента нотоносца, воронка, шкала
 
+  const graphTop = middleY - 2 * gap - reach;
+  const graphBottom = middleY + 2 * gap + reach;
+  drawGraph(ctx, 0, graphRight, graphTop, graphBottom);
+  ctx.fillStyle = "#777777";
+  ctx.beginPath(); ctx.roundRect(graphRight + 3, middleY - 16, 4, 32, 2); ctx.fill();
+  // график и ручка на его правой границе
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(staffLeft, 0, width - staffLeft, canvasHeight); ctx.clip();
   ctx.strokeStyle = "#555555";
   ctx.lineWidth = 2;
   for (let line = 0; line < 5; line++) {
     const y = bottomY - line * gap;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(headX - 8, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(staffLeft, y); ctx.lineTo(headX, y); ctx.stroke();
   }
-  drawRuns(ctx, findRuns(headX - 8), headX - 8, scheme);
+  ctx.strokeStyle = "#333333";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(headX + 0.5, bottomY - 4 * gap); ctx.lineTo(headX + 0.5, bottomY); ctx.stroke();
+  drawRuns(ctx, findRuns(headX), headX, scheme);
   ctx.globalAlpha = 1;
-  // лента нотоносца до графика
+  ctx.restore();
+  // лента нотоносца между графиком и головкой; всё, что левее, обрезаем
 
-  const graphTop = middleY - 2 * gap - reach;
-  const graphBottom = middleY + 2 * gap + reach;
-  const source = drawGraph(ctx, headX, graphRight, graphTop, graphBottom);
-  ctx.fillStyle = "#777777";
-  ctx.beginPath(); ctx.roundRect(headX - 5, middleY - 16, 4, 32, 2); ctx.fill();
-  // график частоты и ручка на его левой границе
-
+  const current = currentNote();
+  let source = null;
+  if (current) {
+    const centerY = stepToY(current.staffStep);
+    source = { x: headX, top: centerY - half, bottom: centerY + half,
+               y: Math.max(centerY - half + 2, Math.min(centerY + half - 2, centerY - centsToUnit(current.cents) * half)) };
+  }
   drawMagnifier(ctx, source, zoomX, width, scheme, layout.text === "inside");
+  // воронка снова от текущей ноты на головке нотоносца
 
   controls.style.left = zoomX + "px";
   controls.style.width = scaleWidth + "px";
@@ -1081,8 +1088,8 @@ strip.addEventListener("pointermove", (event) => {
   strip.style.cursor = dragging || Math.abs(x - dividerX) < 14 ? "ew-resize" : "default";
   if (!dragging) return;
   const width = strip.clientWidth;
-  const graphRight = Math.round(width - Math.max(200, Math.min(260, width * 0.22)) - Math.max(40, width * 0.06));
-  graphShare = Math.max(80, Math.min(graphRight - 150, graphRight - x)) / width;
+  const headX = Math.round(width - Math.max(200, Math.min(260, width * 0.22)) - Math.max(40, width * 0.06));
+  graphShare = Math.max(80, Math.min(headX - 150, x)) / width;
   drawAll();
 });
 strip.addEventListener("pointerup", () => {
@@ -1090,7 +1097,7 @@ strip.addEventListener("pointerup", () => {
   dragging = false;
   try { localStorage.setItem("graphShare", graphShare); } catch (error) {}
 });
-// левую границу графика можно таскать мышкой или пальцем; ширина запоминается
+// правую границу графика можно таскать мышкой или пальцем; ширина запоминается
 
 window.addEventListener("resize", drawAll);
 drawAll();
